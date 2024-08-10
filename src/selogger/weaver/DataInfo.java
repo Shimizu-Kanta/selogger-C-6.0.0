@@ -193,6 +193,8 @@ public class DataInfo {
 		buf.append(SEPARATOR);
 		buf.append("MethodName");
 		buf.append(SEPARATOR);
+		buf.append("MethodDesc");
+		buf.append(SEPARATOR);
 		buf.append("Line");
 		buf.append(SEPARATOR);
 		buf.append("InstructionIndex");
@@ -220,6 +222,8 @@ public class DataInfo {
 		buf.append(SEPARATOR);
 		buf.append(methodInfo.getMethodName()); 
 		buf.append(SEPARATOR);
+		buf.append(methodInfo.getMethodDesc()); 
+		buf.append(SEPARATOR);
 		buf.append(line);
 		buf.append(SEPARATOR);
 		buf.append(instructionIndex);
@@ -245,6 +249,7 @@ public class DataInfo {
 		int methodId = sc.nextInt();
 		sc.next();  // skip className 
 		sc.next();  // skip methodName 
+		sc.next();  // skip methodDesc
 		int line = sc.nextInt();
 		int instructionIndex = sc.nextInt();
 		EventType t = EventType.valueOf(sc.next());
