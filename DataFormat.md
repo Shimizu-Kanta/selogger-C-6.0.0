@@ -100,9 +100,24 @@ The file does not include dataIDs that never occurred at runtime.
 The `discard` mode produce no files.
 
 
-### Binary Omniscient Execuion Trace (format=omni)
+### Omniscient Execution Trace (format=omni, omnibinary)
 
-In the binary omniscient mode, SELogger produces `.slg` files with a sequential number recording all runtime events observed during a program execution.
+#### log-NNNNN.txt (Textual trace files)
+
+In the textual omniscient mode (format=omni), SELogger produces text files recording all runtime events.
+Each file is written in a CSV format having four columns: Seqnum, DataId, ThreadId, and Value.
+Each row indicates an event having the four attributes.
+
+- Seqnum indicates the order of events
+- DataId is an ID to obtain static information of the event from dataids.txt 
+- ThreadID represents the thread of execution on which the event occurred
+- Value associated with the event.
+
+
+
+#### log-NNNNN.slg (Binary trace files)
+
+In the binary omniscient mode (format=omnibinary), SELogger produces `.slg` files with a sequential number recording all runtime events observed during a program execution.
 
 The `selogger.reader.LogPrinter` class is to translate the binary format into a text format.
 
