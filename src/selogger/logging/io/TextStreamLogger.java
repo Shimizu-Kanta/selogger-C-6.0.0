@@ -14,6 +14,13 @@ import selogger.logging.util.ThreadId;
 import selogger.logging.util.TypeIdMap;
 import selogger.logging.util.ObjectIdFile.ExceptionRecording;
 
+/**
+ * This logger records an omniscient execution trace in text files.
+ * 1. log-*.txt files recording a sequence of events,
+ * 2. LOG$Types.txt recording a list of type IDs and their corresponding type names,
+ * 3. ObjectIdMap recording a list of object IDs and their type IDs.
+ * Using the second and third files, a user can know classes in an execution trace.
+ */
 public class TextStreamLogger implements IEventLogger {
 
 	public static final String LOG_PREFIX = "log-";
