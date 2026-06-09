@@ -113,6 +113,11 @@ public class RuntimeWeaverParameters {
 
 	private boolean show_bufferSize = false;
 
+	/**
+	 * 提案手法の低水位で削除を行った際の残す割合
+	 */
+	private int leave_rate = 80;
+
 	public RuntimeWeaverParameters(String args) {
 		if (args == null)
 			args = "";
@@ -234,6 +239,16 @@ public class RuntimeWeaverParameters {
 			} else if (arg.startsWith("showbuffersize=")) {
 				String param = arg.substring("showbuffersize=".length());
 				show_bufferSize = Boolean.parseBoolean(param);
+			} else if (arg.startsWith("leaverate=")) {
+				String param = arg.substring("leaverate=".length());
+				try {
+					leave_rate = Integer.parseInt(param);
+					if (leave_rate < 0 || leave_rate > 100) {
+						leave_rate = 80;
+					}
+				} catch (NumberFormatException e) {
+					leave_rate = 80;
+				}
 			}
 		}
 	}
@@ -341,6 +356,10 @@ public class RuntimeWeaverParameters {
 
 	public boolean getShowBufferSize(){
 		return show_bufferSize;
+	}
+
+	public int getLeaveRate() {
+		return leave_rate;
 	}
 
 	/**

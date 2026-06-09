@@ -131,6 +131,12 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	 * データが追加された回数を知る
 	 */
 	private int put_data_count = 0;
+
+	/**
+	 * (追加要素)
+	 * 低水位削除で残す割合
+	 */
+	private int leaveRate = 80;
 	
 	/**
 	 * このオブジェクトは各イベントにシーケンス番号を生成する。
@@ -150,7 +156,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	 * @param keepObject バッファがJavaオブジェクトを保持する方法を指定します。 
 	 * @param outputJson ロガーがjsonフォーマットを使用するかどうかを指定します。
 	 */
-	public ProposedMethodLogger(File traceFile, int bufferSize, boolean show_bufferSize, PrometObjectRecordingStrategy keepObject, boolean outputJson, IErrorLogger errorLogger) {
+	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean show_bufferSize, PrometObjectRecordingStrategy keepObject, boolean outputJson, IErrorLogger errorLogger) {
 		super("Proposed");
 		this.traceFile = traceFile;
 		this.bufferSize = bufferSize;
@@ -161,6 +167,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		this.logger = errorLogger;
 		this.maxBufferSize = bufferSize;
 		this.show_bufferSize = show_bufferSize;
+		this.leaveRate = leaveRate;
 
 		if (this.keepObject == PrometObjectRecordingStrategy.Id) {
 			objectIDs = new ObjectIdMap(65536);
@@ -265,7 +272,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
         	event_count += after_size - before_size;
 			put_data_count += 1;
-        	if (event_count > list_capacity) {
+        	if (event_count > bufferSize) {
 				trimBuffers();
         	}
     	}
@@ -283,7 +290,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
         	event_count += after_size - before_size;
 			put_data_count += 1;
-    	    if (event_count > list_capacity) {
+    	    if (event_count > bufferSize) {
             	trimBuffers();
     	    }
     	}
@@ -301,7 +308,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
 	        event_count += after_size - before_size;
 			put_data_count += 1;
-	        if (event_count > list_capacity) {
+	        if (event_count > bufferSize) {
             	trimBuffers();
 	        }
 	    }
@@ -319,7 +326,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
 	        event_count += after_size - before_size;
 			put_data_count += 1;
-	        if (event_count > list_capacity) {
+	        if (event_count > bufferSize) {
             	trimBuffers();
 	        }
 	    }
@@ -337,7 +344,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
 	        event_count += after_size - before_size;
 			put_data_count += 1;
-	        if (event_count > list_capacity) {
+	        if (event_count > bufferSize) {
             	trimBuffers();
 	        }
 	    }
@@ -355,7 +362,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
 	        event_count += after_size - before_size;
 			put_data_count += 1;
-	        if (event_count > list_capacity) {
+	        if (event_count > bufferSize) {
             	trimBuffers();
 	        }
 	    }
@@ -373,7 +380,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
 	        event_count += after_size - before_size;
 			put_data_count += 1;
-	        if (event_count > list_capacity) {
+	        if (event_count > bufferSize) {
             	trimBuffers();
 	        }
 	    }
@@ -393,7 +400,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 				int after_size = b.size();
 	            event_count += after_size - before_size;
 				put_data_count += 1;
-	            if (event_count > list_capacity) {
+	            if (event_count > bufferSize) {
             		trimBuffers();
 	            }
 	        }				
@@ -405,7 +412,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 				int after_size = b.size();
 	            event_count += after_size - before_size;
 				put_data_count += 1;
-	            if (event_count > list_capacity) {
+	            if (event_count > bufferSize) {
             		trimBuffers();
 	            }
 	        }
@@ -424,7 +431,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			int after_size = buffer.size();
 	        event_count += after_size - before_size;
 			put_data_count += 1;
-	        if (event_count > list_capacity) {
+	        if (event_count > bufferSize) {
             	trimBuffers();
 	        }
 	    }
@@ -435,14 +442,17 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	 * 
 	 * 方針:
 	 *  - 各バッファの size() を freq とみなし、
+	 *  - list_capacityはbufferSize * leaveRate / 100 として、全バッファのイベント数の合計が list_capacity 以下となるようにする。
 	 *    S(k) = Σ min(k, size_i) が list_capacity 以下となる最大の k を二分探索で決定する。
 	 *  - k の下限は 1 とし、「イベントが存在するバッファには最低 1 件残す」ことを保証する。
 	 *  - list_capacity < 非空バッファ数 のような場合は、S(k) <= list_capacity を満たす k は存在しないため、
 	 *    その場合でも k = 1 を採用し、limit 超過は許容する。
 	 */
 	private void trimBuffers() {
+		list_capacity = bufferSize * leaveRate / 100;
+
 		System.out.println("Start Trim! (eventCount: " + event_count + ")");
-		if (event_count <= list_capacity) {
+		if (event_count <= bufferSize) {
 			// 許容量内であればトリムは不要
 			return;
 		}
