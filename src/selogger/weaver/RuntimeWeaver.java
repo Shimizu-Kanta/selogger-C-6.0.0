@@ -20,6 +20,7 @@ import selogger.logging.io.EventFrequencyLogger;
 import selogger.logging.io.ExecuteBeforeLogger;
 import selogger.logging.io.FilterLogger;
 import selogger.logging.io.LatestEventLogger;
+import selogger.logging.io.ProposedMethodLogger;
 import selogger.logging.io.TextStreamLogger;
 import selogger.logging.IEventLogger;
 
@@ -70,7 +71,7 @@ public class RuntimeWeaver implements ClassFileTransformer {
 	private long startTime;
 	
 
-	public enum Mode { BinaryStream, TextStream, Frequency, FixedSize, ExecuteBefore, Discard, Invalid };
+	public enum Mode { BinaryStream, TextStream, Frequency, FixedSize, ExecuteBefore, Discard, Invalid, Proposed };
 	
 	
 	private RuntimeWeaverParameters params;
@@ -109,6 +110,10 @@ public class RuntimeWeaver implements ClassFileTransformer {
 			switch (params.getMode()) {
 			case FixedSize:
 				logger = new LatestEventLogger(traceFile, params.getBufferSize(), params.getObjectRecordingStrategy(), params.isOutputJsonEnabled(), logMessageFile);
+				break;
+
+			case Proposed:
+				logger = new ProposedMethodLogger(traceFile, params.getBufferSize(), params.getShowBufferSize(), params.getPrometObjectRecordingStrategy(), params.isOutputJsonEnabled(), logMessageFile);
 				break;
 			
 			case Frequency:
