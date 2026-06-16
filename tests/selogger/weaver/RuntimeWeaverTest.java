@@ -11,6 +11,7 @@ import selogger.logging.io.EventFrequencyLogger;
 import selogger.logging.io.FilterLogger;
 import selogger.logging.io.LatestEventLogger;
 import selogger.logging.io.TextStreamLogger;
+import selogger.logging.io.ProposedMethodLogger;
 
 public class RuntimeWeaverTest {
 	
@@ -63,6 +64,14 @@ public class RuntimeWeaverTest {
 		
 		w = new RuntimeWeaver("format=discard");
 		Assert.assertTrue(w.logger instanceof DiscardLogger);
+		w.close();
+
+		w = new RuntimeWeaver("format=proposed" + outputOption);
+		Assert.assertTrue(w.logger instanceof ProposedMethodLogger);
+		w.close();
+
+		w = new RuntimeWeaver("format=promet" + outputOption);
+		Assert.assertTrue(w.logger instanceof ProposedMethodLogger);
 		w.close();
 
 	}

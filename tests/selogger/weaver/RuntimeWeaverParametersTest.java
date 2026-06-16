@@ -36,4 +36,31 @@ public class RuntimeWeaverParametersTest {
 		assertEquals(today, params.getOutputDirname());
 	}
 
+	@Test
+	public void testPrometParameters() {
+		RuntimeWeaverParameters params =
+				new RuntimeWeaverParameters("format=promet,leaverate=80");
+		assertEquals(Mode.Proposed, params.getMode());
+		assertEquals(80, params.getLeaveRate());
+
+		params = new RuntimeWeaverParameters("format=proposed,leaverate=1");
+		assertEquals(Mode.Proposed, params.getMode());
+		assertEquals(1, params.getLeaveRate());
+
+		params = new RuntimeWeaverParameters("leaverate=99");
+		assertEquals(99, params.getLeaveRate());
+
+		params = new RuntimeWeaverParameters("leaverate=0");
+		assertEquals(80, params.getLeaveRate());
+
+		params = new RuntimeWeaverParameters("leaverate=100");
+		assertEquals(80, params.getLeaveRate());
+
+		params = new RuntimeWeaverParameters("leaverate=-1");
+		assertEquals(80, params.getLeaveRate());
+
+		params = new RuntimeWeaverParameters("leaverate=abc");
+		assertEquals(80, params.getLeaveRate());
+	}
+
 }
