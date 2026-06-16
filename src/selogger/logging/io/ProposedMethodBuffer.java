@@ -26,6 +26,9 @@ public class ProposedMethodBuffer {
 	
 	/** この場所で発生した全イベントの累積数 */
 	private long count = 0;
+
+	/** 現在保持しているイベント数 **/
+	private int storedSize = 0;
 	
 	/** 値を格納する配列（int[], Object[] 等） */
 	private Object array;
@@ -56,20 +59,27 @@ public class ProposedMethodBuffer {
 	 * @return 書き込み先の物理インデックス
 	 */
 	private int getNextIndex() {
-		count++;
-		int next = nextPos++;
-		if (nextPos >= capacity) {
-			if (capacity < bufferSize) {
-				// bufferSizeに達するまでは物理拡張を行う
-				capacity = Math.min(capacity * 2, bufferSize);
-				this.seqnums = Arrays.copyOf(this.seqnums, capacity);
-				this.threads = Arrays.copyOf(this.threads, capacity);
-				expandValueArray(capacity);
-			} else {
-				// 上限に達した後はリングバッファとして先頭に戻る
-				nextPos = 0;
-			}
+    	count++;
+
+		// bufferSize に達するまでは必要に応じて物理配列を拡張
+		if (storedSize >= capacity && capacity < bufferSize) {
+			capacity = Math.min(capacity * 2, bufferSize);
+			this.seqnums = Arrays.copyOf(this.seqnums, capacity);
+			this.threads = Arrays.copyOf(this.threads, capacity);
+			expandValueArray(capacity);
 		}
+
+		int next = nextPos;
+
+		if (storedSize < bufferSize) {
+			storedSize++;
+		}
+
+		nextPos++;
+		if (nextPos >= bufferSize) {
+			nextPos = 0;
+		}
+
 		return next;
 	}
 
@@ -169,26 +179,37 @@ public class ProposedMethodBuffer {
 	 * @param trimCount 削除する（前に詰める）イベント数
 	 */
 	public synchronized void trimOldEvents(int trimCount) {
-		if (trimCount <= 0 || count == 0) return;
-		int currentSize = size();
-		int actualTrim = Math.min(trimCount, currentSize);
-		int newSize = currentSize - actualTrim;
+		if (trimCount <= 0 || storedSize == 0) return;
 
-		// 物理シフト（System.arraycopy）によるデータ移動
-		System.arraycopy(array, actualTrim, array, 0, newSize);
-		System.arraycopy(seqnums, actualTrim, seqnums, 0, newSize);
-		System.arraycopy(threads, actualTrim, threads, 0, newSize);
+		int actualTrim = Math.min(trimCount, storedSize);
+		int newSize = storedSize - actualTrim;
 
-		// 状態の更新
+		Object newArray = Array.newInstance(array.getClass().getComponentType(), capacity);
+		long[] newSeqnums = new long[capacity];
+		int[] newThreads = new int[capacity];
+
+		for (int i = 0; i < newSize; i++) {
+			int oldIdx = getPos(actualTrim + i);
+			Array.set(newArray, i, Array.get(array, oldIdx));
+			newSeqnums[i] = seqnums[oldIdx];
+			newThreads[i] = threads[oldIdx];
+		}
+
+		array = newArray;
+		seqnums = newSeqnums;
+		threads = newThreads;
+
+		storedSize = newSize;
 		nextPos = newSize;
-		count = newSize; 
+
+		// count は累積発生回数なので変更しない
 	}
 
 	/**
 	 * @return このバッファに論理的に保持されているイベント数
 	 */
 	public synchronized int size() {
-		return (int)Math.min(count, bufferSize);
+		return storedSize;
 	}
 
 	/**
@@ -202,7 +223,11 @@ public class ProposedMethodBuffer {
 	 * 論理的なi番目（最古=0）の物理インデックスを計算
 	 */
 	private int getPos(int i) {
-		return (count >= bufferSize) ? (nextPos + i) % bufferSize : i;
+		if (storedSize < bufferSize ) {
+			return i;
+		}
+
+		return (nextPos + i) % bufferSize;
 	}
 
 	/**

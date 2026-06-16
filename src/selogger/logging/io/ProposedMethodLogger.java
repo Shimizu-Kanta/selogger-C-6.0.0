@@ -27,8 +27,8 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	/** 各場所で記録する最大イベント数 */
 	private int bufferSize;
 	
-	/** バッファが満杯になった際に残す割合 (0.0 - 1.0) */
-	private double leaveRate;
+	/** バッファが満杯になった際に残す割合 (1 ~ 99) */
+	private int leaveRate;
 	
 	/** 各データIDに対応するバッファのリスト */
 	private ArrayList<ProposedMethodBuffer> buffers;
@@ -56,11 +56,11 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	/**
 	 * ロガーのインスタンスを作成します。
 	 */
-	public ProposedMethodLogger(File traceFile, int bufferSize, double leaveRate, boolean recordString, PrometObjectRecordingStrategy keepObject, boolean outputJson, IErrorLogger errorLogger) {
+	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString, PrometObjectRecordingStrategy keepObject, boolean outputJson, IErrorLogger errorLogger) {
 		super("promet");
 		this.traceFile = traceFile;
 		this.bufferSize = bufferSize;
-		this.leaveRate = leaveRate;
+		this.leaveRate =  (leaveRate < 1 || leaveRate > 99) ? 80 : leaveRate;
 		this.recordString = recordString;
 		this.buffers = new ArrayList<>();
 		this.keepObject = keepObject;
@@ -86,7 +86,8 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		
 		// 水位管理ロジック: いっぱいになったら一括削除して空きを作る
 		if (buf.size() >= bufferSize) {
-			int itemsToRemove = bufferSize - (int)(bufferSize * leaveRate);
+			int keepItems = bufferSize * leaveRate / 100;
+			int itemsToRemove = Math.max(1, bufferSize - keepItems);
 			buf.trimOldEvents(itemsToRemove);
 		}
 		

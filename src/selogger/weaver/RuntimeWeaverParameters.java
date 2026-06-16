@@ -243,7 +243,7 @@ public class RuntimeWeaverParameters {
 				String param = arg.substring("leaverate=".length());
 				try {
 					leave_rate = Integer.parseInt(param);
-					if (leave_rate < 0 || leave_rate > 100) {
+					if (leave_rate < 1 || leave_rate > 99) {
 						leave_rate = 80;
 					}
 				} catch (NumberFormatException e) {
