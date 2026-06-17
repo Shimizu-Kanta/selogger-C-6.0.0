@@ -69,6 +69,17 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		if (this.keepObject == PrometObjectRecordingStrategy.Id) {
 			objectIDs = new ObjectIdMap(65536);
 		}
+
+		if (logger != null) {
+			logger.log("ProposedMethodLogger DEBUG: bufferSize=" + this.bufferSize
+					+ ", leaveRate=" + this.leaveRate
+					+ ", recordString=" + this.recordString
+					+ ", keepObject=" + this.keepObject
+					+ ", outputJson=" + this.outputJson
+					+ ", traceFile=" + this.traceFile.getAbsolutePath()
+					+ ", bufferClass=" + ProposedMethodBuffer.class.getProtectionDomain().getCodeSource()
+				);
+		}
 	}
 
 	/**
@@ -88,7 +99,24 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		if (buf.size() >= bufferSize) {
 			int keepItems = bufferSize * leaveRate / 100;
 			int itemsToRemove = Math.max(1, bufferSize - keepItems);
+
+			if (logger != null) {
+				logger.log("ProposedMethodLogger DEBUG trim before: dataId=" + dataId
+						+ ", beforeSize=" + buf.size()
+						+ ", beforeCount=" + buf.count()
+						+ ", bufferSize=" + bufferSize
+						+ ", keepItems=" + keepItems
+						+ ", itemsToRemove=" + itemsToRemove);
+			}	
+
 			buf.trimOldEvents(itemsToRemove);
+
+			if (logger != null) {
+				logger.log("ProposedMethodLogger DEBUG trim after: dataId=" + dataId
+						+ ", afterSize=" + buf.size()
+						+ ", afterCount=" + buf.count());
+			}
+
 		}
 		
 		return buf;
