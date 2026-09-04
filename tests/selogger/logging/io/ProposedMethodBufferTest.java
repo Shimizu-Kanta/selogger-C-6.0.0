@@ -20,89 +20,76 @@ public class ProposedMethodBufferTest {
 	}
 
 	@Test
-	public void testFreqAndRecordAfterTrim() throws Exception {
-		ProposedMethodBuffer buf =
-				new ProposedMethodBuffer(int.class, 10, PrometObjectRecordingStrategy.Strong);
+	public void testTrimToSizeKeepsNewestEventsAndFreq() throws Exception {
+		ProposedMethodBuffer buf = new ProposedMethodBuffer(int.class, 10, PrometObjectRecordingStrategy.Strong);
 
-		for (int i = 0; i < 10; i++) {
-			buf.addInt(i, i, 1);
+		for (int i = 0; i < 8; i++) {
+			buf.addInt(i, i, 0);
 		}
 
-		Assert.assertEquals(10L, buf.count());
-		Assert.assertEquals(10, buf.size());
-
-		buf.trimOldEvents(2);
-
-		// trimしても累積発生回数 freq は減らない
-		Assert.assertEquals(10L, buf.count());
-
-		// 保持件数 record だけ減る
+		Assert.assertEquals(8L, buf.count());
 		Assert.assertEquals(8, buf.size());
 
-		buf.addInt(10, 10, 1);
+		int removed = buf.trimToSize(5);
 
-		Assert.assertEquals(11L, buf.count());
-		Assert.assertEquals(9, buf.size());
-
-		JsonNode root = toJson(buf);
-		Assert.assertEquals(11L, root.get("freq").asLong());
-		Assert.assertEquals(9, root.get("record").asInt());
-
-		Assert.assertEquals(9, root.get("value").size());
-		Assert.assertEquals(2, root.get("value").get(0).asInt());
-		Assert.assertEquals(10, root.get("value").get(8).asInt());
-	}
-
-	@Test
-	public void testRingBufferOrderWithoutTrim() throws Exception {
-		ProposedMethodBuffer buf =
-				new ProposedMethodBuffer(int.class, 4, PrometObjectRecordingStrategy.Strong);
-
-		for (int i = 0; i < 7; i++) {
-			buf.addInt(i, i, 1);
-		}
-
-		Assert.assertEquals(7L, buf.count());
-		Assert.assertEquals(4, buf.size());
-
-		JsonNode root = toJson(buf);
-		Assert.assertEquals(7L, root.get("freq").asLong());
-		Assert.assertEquals(4, root.get("record").asInt());
-
-		// 最新4件が古い順に 3,4,5,6 として出ること
-		Assert.assertEquals(3, root.get("value").get(0).asInt());
-		Assert.assertEquals(4, root.get("value").get(1).asInt());
-		Assert.assertEquals(5, root.get("value").get(2).asInt());
-		Assert.assertEquals(6, root.get("value").get(3).asInt());
-
-		Assert.assertEquals(3, root.get("seqnum").get(0).asLong());
-		Assert.assertEquals(6, root.get("seqnum").get(3).asLong());
-	}
-
-	@Test
-	public void testTrimKeepsLogicalOrderAfterRingBufferWrapped() throws Exception {
-		ProposedMethodBuffer buf =
-				new ProposedMethodBuffer(int.class, 4, PrometObjectRecordingStrategy.Strong);
-
-		for (int i = 0; i < 7; i++) {
-			buf.addInt(i, i, 1);
-		}
-
-		// 論理的には [3,4,5,6] を保持している状態。
-		// そこから古い2件を削除すると [5,6] が残るはず。
-		buf.trimOldEvents(2);
-
-		Assert.assertEquals(7L, buf.count());
-		Assert.assertEquals(2, buf.size());
-
-		buf.addInt(7, 7, 1);
+		Assert.assertEquals(3, removed);
+		Assert.assertEquals("freq/count must not decrease by trim", 8L, buf.count());
+		Assert.assertEquals("record/size must decrease by trim", 5, buf.size());
 
 		JsonNode root = toJson(buf);
 		Assert.assertEquals(8L, root.get("freq").asLong());
-		Assert.assertEquals(3, root.get("record").asInt());
+		Assert.assertEquals(5, root.get("record").asInt());
+		Assert.assertEquals(5, root.get("value").size());
+		Assert.assertEquals(5, root.get("seqnum").size());
+		Assert.assertEquals(5, root.get("thread").size());
 
-		Assert.assertEquals(5, root.get("value").get(0).asInt());
-		Assert.assertEquals(6, root.get("value").get(1).asInt());
-		Assert.assertEquals(7, root.get("value").get(2).asInt());
+		// Oldest three values 0,1,2 are removed. Newest five values remain in order.
+		for (int i = 0; i < 5; i++) {
+			Assert.assertEquals(i + 3, root.get("value").get(i).asInt());
+			Assert.assertEquals(i + 3, root.get("seqnum").get(i).asLong());
+			Assert.assertEquals(0, root.get("thread").get(i).asInt());
+		}
+	}
+
+	@Test
+	public void testTrimToSizeDoesNothingWhenKeepSizeIsLargerThanCurrentSize() throws Exception {
+		ProposedMethodBuffer buf = new ProposedMethodBuffer(int.class, 10, PrometObjectRecordingStrategy.Strong);
+
+		for (int i = 0; i < 3; i++) {
+			buf.addInt(i, i, 0);
+		}
+
+		int removed = buf.trimToSize(5);
+
+		Assert.assertEquals(0, removed);
+		Assert.assertEquals(3L, buf.count());
+		Assert.assertEquals(3, buf.size());
+
+		JsonNode root = toJson(buf);
+		Assert.assertEquals(3L, root.get("freq").asLong());
+		Assert.assertEquals(3, root.get("record").asInt());
+		Assert.assertEquals(0, root.get("value").get(0).asInt());
+		Assert.assertEquals(1, root.get("value").get(1).asInt());
+		Assert.assertEquals(2, root.get("value").get(2).asInt());
+	}
+
+	@Test
+	public void testTrimToZeroKeepsFreqAndDropsRecord() throws Exception {
+		ProposedMethodBuffer buf = new ProposedMethodBuffer(int.class, 10, PrometObjectRecordingStrategy.Strong);
+
+		for (int i = 0; i < 4; i++) {
+			buf.addInt(i, i, 0);
+		}
+
+		int removed = buf.trimToSize(0);
+
+		Assert.assertEquals(4, removed);
+		Assert.assertEquals(4L, buf.count());
+		Assert.assertEquals(0, buf.size());
+
+		JsonNode root = toJson(buf);
+		Assert.assertEquals(4L, root.get("freq").asLong());
+		Assert.assertEquals(0, root.get("record").asInt());
+		Assert.assertNull("value array is omitted when record is zero", root.get("value"));
 	}
 }

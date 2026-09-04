@@ -3,42 +3,45 @@ package selogger.logging.io;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.util.Arrays;
+
 import selogger.logging.io.ProposedMethodLogger.PrometObjectRecordingStrategy;
 import selogger.logging.util.JsonBuffer;
 import selogger.logging.util.ObjectId;
 
 /**
- * データIDの最新k個のイベントを記録するリングバッファ。
- * 物理シフトによる低水位トリムをサポートします。
+ * dataId ごとのイベントを保持する buffer。
+ *
+ * promet では全体容量は ProposedMethodLogger が管理する。
+ * この buffer は、指定された keepSize まで自分の中の古いイベントを削る責務を持つ。
  */
 public class ProposedMethodBuffer {
 
 	private static final int DEFAULT_CAPACITY = 32;
 
-	/** ユーザーが指定した最大保持数 */
+	/** この buffer が物理的に保持し得る最大数。通常は全体容量と同じ値が渡される。 */
 	private int bufferSize;
-	
+
 	/** 現在の配列の物理サイズ */
 	private int capacity;
-	
+
 	/** 次に書き込む物理インデックス */
 	private int nextPos = 0;
-	
-	/** この場所で発生した全イベントの累積数 */
+
+	/** この dataId で発生した全イベントの累積数 */
 	private long count = 0;
 
-	/** 現在保持しているイベント数 **/
+	/** 現在保持しているイベント数 */
 	private int storedSize = 0;
-	
+
 	/** 値を格納する配列（int[], Object[] 等） */
 	private Object array;
-	
+
 	/** シーケンス番号の配列 */
 	private long[] seqnums;
-	
+
 	/** スレッドIDの配列 */
 	private int[] threads;
-	
+
 	/** オブジェクトの記録保持戦略 */
 	private PrometObjectRecordingStrategy keepObject;
 
@@ -46,8 +49,8 @@ public class ProposedMethodBuffer {
 	 * バッファを作成します。
 	 */
 	public ProposedMethodBuffer(Class<?> type, int bufferSize, PrometObjectRecordingStrategy keepObject) {
-		this.capacity = Math.min(DEFAULT_CAPACITY, bufferSize);
-		this.bufferSize = bufferSize;
+		this.bufferSize = Math.max(1, bufferSize);
+		this.capacity = Math.min(DEFAULT_CAPACITY, this.bufferSize);
 		this.array = Array.newInstance(type, capacity);
 		this.seqnums = new long[capacity];
 		this.threads = new int[capacity];
@@ -59,7 +62,7 @@ public class ProposedMethodBuffer {
 	 * @return 書き込み先の物理インデックス
 	 */
 	private int getNextIndex() {
-    	count++;
+		count++;
 
 		// bufferSize に達するまでは必要に応じて物理配列を拡張
 		if (storedSize >= capacity && capacity < bufferSize) {
@@ -175,14 +178,17 @@ public class ProposedMethodBuffer {
 	}
 
 	/**
-	 * 物理シフトによるお片付け。
-	 * @param trimCount 削除する（前に詰める）イベント数
+	 * この buffer 内の古いイベントを trimCount 件削除する。
+	 * 削除順は、この buffer 内における seqnum の古い順。
+	 *
+	 * @param trimCount 削除するイベント数
 	 */
 	public synchronized void trimOldEvents(int trimCount) {
 		if (trimCount <= 0 || storedSize == 0) return;
 
-		int actualTrim = Math.min(trimCount, storedSize);
-		int newSize = storedSize - actualTrim;
+		int currentSize = size();
+		int actualTrim = Math.min(trimCount, currentSize);
+		int newSize = currentSize - actualTrim;
 
 		Object newArray = Array.newInstance(array.getClass().getComponentType(), capacity);
 		long[] newSeqnums = new long[capacity];
@@ -206,7 +212,27 @@ public class ProposedMethodBuffer {
 	}
 
 	/**
-	 * @return このバッファに論理的に保持されているイベント数
+	 * この buffer の保持件数を keepSize まで落とす。
+	 * 古いイベントから削る。
+	 *
+	 * @param keepSize trim 後に残す件数
+	 * @return 削除した件数
+	 */
+	public synchronized int trimToSize(int keepSize) {
+		int currentSize = size();
+		keepSize = Math.max(0, keepSize);
+
+		if (keepSize >= currentSize) {
+			return 0;
+		}
+
+		int trimCount = currentSize - keepSize;
+		trimOldEvents(trimCount);
+		return trimCount;
+	}
+
+	/**
+	 * @return この buffer に論理的に保持されているイベント数
 	 */
 	public synchronized int size() {
 		return storedSize;
@@ -220,10 +246,10 @@ public class ProposedMethodBuffer {
 	}
 
 	/**
-	 * 論理的なi番目（最古=0）の物理インデックスを計算
+	 * 論理的な i 番目（最古=0）の物理インデックスを計算する。
 	 */
 	private int getPos(int i) {
-		if (storedSize < bufferSize ) {
+		if (storedSize < bufferSize) {
 			return i;
 		}
 
@@ -265,7 +291,7 @@ public class ProposedMethodBuffer {
 		if (array instanceof char[]) return Integer.toString((int)((char[])array)[idx]);
 		if (array instanceof short[]) return Short.toString(((short[])array)[idx]);
 		if (array instanceof byte[]) return Byte.toString(((byte[])array)[idx]);
-		
+
 		Object o = ((Object[])array)[idx];
 		if (o instanceof WeakReference) o = ((WeakReference<?>)o).get();
 		if (o instanceof ObjectId) return Long.toString(((ObjectId)o).getId());
@@ -310,8 +336,9 @@ public class ProposedMethodBuffer {
 							o = ((WeakReference<?>)o).get();
 						}
 						buf.writeStartObject();
-						if (o == null) buf.writeStringField("id", "<GC>");
-						else {
+						if (o == null) {
+							buf.writeStringField("id", "<GC>");
+						} else {
 							buf.writeStringField("id", Integer.toHexString(System.identityHashCode(o)));
 							buf.writeStringField("type", o.getClass().getName());
 							if (o instanceof String) buf.writeEscapedStringField("str", (String)o);
