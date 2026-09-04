@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 
 import selogger.logging.io.FilterLogger.PartialSaveStrategy;
 import selogger.logging.io.LatestEventLogger.ObjectRecordingStrategy;
+import selogger.logging.io.ProposedMethodLogger.PrometObjectRecordingStrategy;
 import selogger.logging.util.ObjectIdFile.ExceptionRecording;
 import selogger.weaver.RuntimeWeaver.Mode;
 
@@ -51,6 +52,9 @@ public class RuntimeWeaverParameters {
 	 * Strategy to keep objects on memory
 	 */
 	private ObjectRecordingStrategy keepObject = ObjectRecordingStrategy.Strong;
+
+	private PrometObjectRecordingStrategy ProposedkeepObject = PrometObjectRecordingStrategy.Strong;
+
 
 	/**
 	 * If true, automatic filtering for security manager classes is disabled
@@ -107,6 +111,13 @@ public class RuntimeWeaverParameters {
 	 */
 	private Date currentDate = new Date();
 
+	private boolean show_bufferSize = false;
+
+	/**
+	 * 提案手法の低水位で削除を行った際の残す割合
+	 */
+	private int leave_rate = 80;
+
 	public RuntimeWeaverParameters(String args) {
 		if (args == null)
 			args = "";
@@ -143,10 +154,13 @@ public class RuntimeWeaverParameters {
 				String param = arg.substring("keepobj=".length());
 				if (param.equalsIgnoreCase("true") || param.equalsIgnoreCase("strong")) {
 					keepObject = ObjectRecordingStrategy.Strong;
+					ProposedkeepObject = PrometObjectRecordingStrategy.Strong;
 				} else if (param.equalsIgnoreCase("false") || param.equalsIgnoreCase("weak")) {
 					keepObject = ObjectRecordingStrategy.Weak;
+					ProposedkeepObject = PrometObjectRecordingStrategy.Weak;
 				} else if (param.equalsIgnoreCase("id")) {
 					keepObject = ObjectRecordingStrategy.Id;
+					ProposedkeepObject = PrometObjectRecordingStrategy.Id;
 				}
 			} else if (arg.startsWith("logstart=")) {
 				DataInfoPattern p = new DataInfoPattern(arg.substring("logstart=".length()));
@@ -217,8 +231,23 @@ public class RuntimeWeaverParameters {
 					mode = Mode.BinaryStream;
 				} else if (opt.equals("latest") || opt.equals("nearomni") || opt.equals("near-omni")) {
 					mode = Mode.FixedSize;
+				} else if (opt.equals("proposed") || opt.equals("promet")) {
+					mode = Mode.Proposed;
 				} else {
 					mode = Mode.Invalid;
+				}
+			} else if (arg.startsWith("showbuffersize=")) {
+				String param = arg.substring("showbuffersize=".length());
+				show_bufferSize = Boolean.parseBoolean(param);
+			} else if (arg.startsWith("leaverate=")) {
+				String param = arg.substring("leaverate=".length());
+				try {
+					leave_rate = Integer.parseInt(param);
+					if (leave_rate < 1 || leave_rate > 99) {
+						leave_rate = 80;
+					}
+				} catch (NumberFormatException e) {
+					leave_rate = 80;
 				}
 			}
 		}
@@ -289,6 +318,10 @@ public class RuntimeWeaverParameters {
 		return keepObject;
 	}
 
+	public PrometObjectRecordingStrategy getPrometObjectRecordingStrategy() {
+		return ProposedkeepObject;
+	}
+
 	public boolean isOutputJsonEnabled() {
 		return outputJson;
 	}
@@ -319,6 +352,14 @@ public class RuntimeWeaverParameters {
 
 	public PartialSaveStrategy getPartialSaveStrategy() {
 		return partialSave;
+	}
+
+	public boolean getShowBufferSize(){
+		return show_bufferSize;
+	}
+
+	public int getLeaveRate() {
+		return leave_rate;
 	}
 
 	/**
