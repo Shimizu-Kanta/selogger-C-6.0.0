@@ -67,6 +67,25 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	/** global trim を実際に実行した回数。効果測定とテスト用。 */
 	private int trimCount;
 
+	/**
+	 * 共通上限 cap が 0 になったとき（1 命令あたり 1 件すら保持できない退化ケース）に、
+	 * トレースの保存自体を諦めるかどうか（promet の abortonzerok オプション）。
+	 *
+	 * <p>論文 3.2 節は、この状況では k = 0 としてエラーを記録し、実行トレースの保存自体を
+	 * 諦めるとしている。既定の false では、従来どおり余り枠を保存数の少ない buffer に
+	 * 配って保存を継続する（警告は 1 回だけ出す）。</p>
+	 */
+	private final boolean abortOnZeroCap;
+
+	/** cap が 0 になったことがあるか。JSON の zeroCapReached として出力する。 */
+	private boolean zeroCapReached;
+
+	/** cap == 0 の警告を出したか。毎 trim で出さないための抑制フラグ。 */
+	private boolean zeroCapWarned;
+
+	/** abortOnZeroCap により値の保存を停止したか。停止後は freq だけを数える。 */
+	private boolean tracingAborted;
+
 	/** 出力先トレースファイル */
 	private File traceFile;
 
@@ -120,22 +139,37 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	};
 
 	/**
-	 * ロガーのインスタンスを作成します。keepK は無効（既定）。
+	 * ロガーのインスタンスを作成します。keepK / abortOnZeroCap はいずれも無効（既定）。
 	 */
 	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString,
 			PrometObjectRecordingStrategy keepObject, boolean outputJson, IErrorLogger errorLogger) {
-		this(traceFile, bufferSize, leaveRate, recordString, keepObject, outputJson, false, errorLogger);
+		this(traceFile, bufferSize, leaveRate, recordString, keepObject, outputJson, false, false, errorLogger);
 	}
 
 	/**
-	 * ロガーのインスタンスを作成します。
+	 * ロガーのインスタンスを作成します。abortOnZeroCap は無効（既定）。
 	 *
 	 * @param keepK true なら、global trim で決まった共通上限 k を trim 後も
 	 *              各 buffer の保持上限として効かせ続ける（promet の keepk オプション）
 	 */
 	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString,
 			PrometObjectRecordingStrategy keepObject, boolean outputJson, boolean keepK, IErrorLogger errorLogger) {
+		this(traceFile, bufferSize, leaveRate, recordString, keepObject, outputJson, keepK, false, errorLogger);
+	}
+
+	/**
+	 * ロガーのインスタンスを作成します。
+	 *
+	 * @param keepK          true なら、global trim で決まった共通上限 k を trim 後も
+	 *                       各 buffer の保持上限として効かせ続ける（promet の keepk オプション）
+	 * @param abortOnZeroCap true なら、共通上限が 0 になった時点でトレースの保存を諦め、
+	 *                       以降は freq の集計だけを続ける（promet の abortonzerok オプション）
+	 */
+	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString,
+			PrometObjectRecordingStrategy keepObject, boolean outputJson, boolean keepK, boolean abortOnZeroCap,
+			IErrorLogger errorLogger) {
 		super("promet");
+		this.abortOnZeroCap = abortOnZeroCap;
 		this.traceFile = traceFile;
 		this.bufferSize = Math.max(1, bufferSize);
 		this.leaveRate = (leaveRate < 1 || leaveRate > 99) ? 80 : leaveRate;
@@ -182,6 +216,28 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		if (totalRecords >= bufferSize) {
 			trimAllBuffers();
 		}
+	}
+
+	/**
+	 * 値を記録する前の共通処理。全体容量を確保し、値を保存してよいかを返す。
+	 *
+	 * <p>abortonzerok による保存停止は、この呼び出しの中の global trim で初めて
+	 * 起こることがある。その場合、停止の引き金になったイベント自身も保存してはならないので、
+	 * 容量確保のあとにもう一度停止フラグを見る。</p>
+	 *
+	 * @param dataId 対象のイベント
+	 * @param type   buffer を新規作成する場合の要素型
+	 * @return 値を保存してよいなら true。保存停止中なら freq だけ数えて false
+	 */
+	private boolean ensureCapacityOrCountOnly(int dataId, Class<?> type) {
+		if (!tracingAborted) {
+			ensureGlobalCapacityBeforeRecord();
+		}
+		if (tracingAborted) {
+			countEventOnly(dataId, type);
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -284,6 +340,74 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	}
 
 	/**
+	 * cap == 0 になったことを 1 回だけ警告する。
+	 *
+	 * <p>この状態は毎回の global trim で繰り返し起こるので、
+	 * フラグで抑制して 2 回目以降は何も出さない。</p>
+	 *
+	 * @param eventKinds 現在保持している buffer の数（= 記録対象になったイベント種類数 n）
+	 */
+	private void warnZeroCapOnce(int eventKinds) {
+		if (zeroCapWarned) return;
+		zeroCapWarned = true;
+		if (logger == null) return;
+
+		logger.log("promet: the common per-event cap k became 0"
+				+ " (event kinds n=" + eventKinds + ", size L=" + bufferSize + ", leaverate=" + leaveRate + ")."
+				+ " There are too many event kinds to keep even one record each."
+				+ " Recording continues: the remaining budget is distributed to the least-recorded events."
+				+ " Specify abortonzerok=true to give up recording the trace instead."
+				+ " This warning is reported only once.");
+	}
+
+	/**
+	 * トレースの保存を停止する。以降 recordEvent は freq だけを更新する。
+	 *
+	 * <p>論文 3.2 節の「実装上は k = 0 としてエラーを記録し、実行トレースの保存自体を
+	 * 諦める」に対応する。既存 buffer は保持件数を捨てて配列を解放するが、
+	 * freq を出力できるように count は残す。</p>
+	 *
+	 * @param eventKinds 現在保持している buffer の数（= 記録対象になったイベント種類数 n）
+	 */
+	private void abortTracing(int eventKinds) {
+		if (tracingAborted) return;
+		tracingAborted = true;
+
+		for (ProposedMethodBuffer b: buffers) {
+			if (b != null) b.releaseStorage();
+		}
+		totalRecords = 0;
+
+		if (logger != null) {
+			logger.log("promet: the common per-event cap k became 0"
+					+ " (event kinds n=" + eventKinds + ", size L=" + bufferSize + ", leaverate=" + leaveRate + ")."
+					+ " There are too many event kinds to keep even one record each."
+					+ " abortonzerok=true, so recording the trace is given up here."
+					+ " Only event frequencies (freq) are collected from now on.");
+		}
+	}
+
+	/**
+	 * 保存停止後に、値を保存せず freq だけを数える。
+	 *
+	 * @param dataId 対象のイベント
+	 * @param type   buffer を新規作成する場合の要素型。値は保存しないので出力には現れない
+	 */
+	private void countEventOnly(int dataId, Class<?> type) {
+		while (dataId >= buffers.size()) {
+			buffers.add(null);
+		}
+		ProposedMethodBuffer buf = buffers.get(dataId);
+		if (buf == null) {
+			// 保存はしないので、配列は最小サイズで確保する。
+			buf = new ProposedMethodBuffer(type, 1, keepObject);
+			buf.releaseStorage();
+			buffers.set(dataId, buf);
+		}
+		buf.countOnly();
+	}
+
+	/**
 	 * 全 buffer 合計が上限に達したときに実行する global trim。
 	 *
 	 * 1. 非 null な buffer を1回走査して trim 計画と全体保持件数を作る。
@@ -328,6 +452,17 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 		// 手順4: cap の二分探索。
 		int cap = findGlobalCap(sizes, prefixSums, targetTotal);
+
+		// 手順4b: cap == 0 は、イベント種類が多すぎて 1 種類あたり 1 件すら
+		// 保持できない退化ケース（論文 3.2 節）。
+		if (cap == 0) {
+			zeroCapReached = true;
+			if (abortOnZeroCap) {
+				abortTracing(n);
+				return;
+			}
+			warnZeroCapOnce(n);
+		}
 
 		// 手順5: 各 buffer の保持件数。
 		long plannedTotal = 0;
@@ -375,7 +510,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, boolean value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, boolean.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, boolean.class);
 		int sizeBefore = buf.size();
 		buf.addBoolean(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -384,7 +519,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, byte value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, byte.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, byte.class);
 		int sizeBefore = buf.size();
 		buf.addByte(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -393,7 +528,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, char value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, char.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, char.class);
 		int sizeBefore = buf.size();
 		buf.addChar(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -402,7 +537,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, double value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, double.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, double.class);
 		int sizeBefore = buf.size();
 		buf.addDouble(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -411,7 +546,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, float value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, float.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, float.class);
 		int sizeBefore = buf.size();
 		buf.addFloat(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -420,7 +555,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, int value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, int.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, int.class);
 		int sizeBefore = buf.size();
 		buf.addInt(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -429,7 +564,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, long value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, long.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, long.class);
 		int sizeBefore = buf.size();
 		buf.addLong(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -438,7 +573,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, short value) {
-		ensureGlobalCapacityBeforeRecord();
+		if (!ensureCapacityOrCountOnly(dataId, short.class)) return;
 		ProposedMethodBuffer buf = getBuffer(dataId, short.class);
 		int sizeBefore = buf.size();
 		buf.addShort(value, seqnum.getAndIncrement(), ThreadId.get());
@@ -447,7 +582,8 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	@Override
 	public synchronized void recordEvent(int dataId, Object value) {
-		ensureGlobalCapacityBeforeRecord();
+		Class<?> type = (keepObject == PrometObjectRecordingStrategy.Id) ? ObjectId.class : Object.class;
+		if (!ensureCapacityOrCountOnly(dataId, type)) return;
 		if (keepObject == PrometObjectRecordingStrategy.Id) {
 			ProposedMethodBuffer buf = getBuffer(dataId, ObjectId.class);
 			int sizeBefore = buf.size();
@@ -487,10 +623,37 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	}
 
 	/**
+	 * 共通上限が 0 になったことがある場合だけ、トップレベルに zeroCapReached を足す。
+	 *
+	 * <p>既存キーは変更せず追加のみ。0 にならない通常の実行では何も書かないので、
+	 * 出力は本オプション導入前と一致する。</p>
+	 */
+	@Override
+	protected void writeTopLevelFields(PrintWriter w) {
+		if (zeroCapReached) {
+			w.write(", \"zeroCapReached\":true");
+		}
+	}
+
+	/**
 	 * @return global trim を実際に実行した回数。効果測定とテスト用
 	 */
 	public synchronized int getTrimCount() {
 		return trimCount;
+	}
+
+	/**
+	 * @return 共通上限が 0 になったことがあるか
+	 */
+	public synchronized boolean isZeroCapReached() {
+		return zeroCapReached;
+	}
+
+	/**
+	 * @return abortonzerok によりトレースの保存を停止したか
+	 */
+	public synchronized boolean isTracingAborted() {
+		return tracingAborted;
 	}
 
 	/**

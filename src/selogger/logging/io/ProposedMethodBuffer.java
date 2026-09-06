@@ -310,6 +310,35 @@ public class ProposedMethodBuffer {
 	}
 
 	/**
+	 * 値を保存せずに、発生回数だけを 1 増やす。
+	 *
+	 * <p>promet が abortonzerok によりトレースの保存を諦めたあと、
+	 * freq の集計だけを続けるために使う。</p>
+	 */
+	public synchronized void countOnly() {
+		count++;
+	}
+
+	/**
+	 * 保持している値を捨て、配列を最小サイズまで縮めてメモリを解放する。
+	 * 累積発生回数 count は保持する。
+	 *
+	 * <p>promet が abortonzerok によりトレースの保存を諦めたときに使う。
+	 * 以降この buffer に値を追加しないことは呼び出し側の責務
+	 * （ProposedMethodLogger は保存停止後 {@link #countOnly()} しか呼ばない）。
+	 * 万一追加されても不変条件は壊れず、その 1 件が保持されるだけである。</p>
+	 */
+	public synchronized void releaseStorage() {
+		storedSize = 0;
+		nextPos = 0;
+		retentionLimit = 1;
+		capacity = 1;
+		array = newValueArray(array.getClass().getComponentType(), 1);
+		seqnums = new long[1];
+		threads = new int[1];
+	}
+
+	/**
 	 * 論理位置 from から len 件を、src の該当区間から dst の先頭へコピーする。
 	 *
 	 * <p>src はリングとして折り返している可能性があるため、{@link #getPos(int)} の統一形

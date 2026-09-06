@@ -113,7 +113,7 @@ public class RuntimeWeaver implements ClassFileTransformer {
 				break;
 
 			case Proposed:
-				logger = new ProposedMethodLogger(traceFile, params.getBufferSize(), params.getLeaveRate(), params.getShowBufferSize(), params.getPrometObjectRecordingStrategy(), params.isOutputJsonEnabled(), params.getKeepK(), logMessageFile);
+				logger = new ProposedMethodLogger(traceFile, params.getBufferSize(), params.getLeaveRate(), params.getShowBufferSize(), params.getPrometObjectRecordingStrategy(), params.isOutputJsonEnabled(), params.getKeepK(), params.getAbortOnZeroK(), logMessageFile);
 				break;
 			
 			case Frequency:

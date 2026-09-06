@@ -124,6 +124,12 @@ public class RuntimeWeaverParameters {
 	 */
 	private boolean keepK = false;
 
+	/**
+	 * 提案手法で、共通上限 k が 0 になった（1 イベント種別あたり 1 件も保持できない）ときに、
+	 * トレースの保存自体を諦めるかどうか。挙動が変わるため既定は false。
+	 */
+	private boolean abortOnZeroK = false;
+
 	public RuntimeWeaverParameters(String args) {
 		if (args == null)
 			args = "";
@@ -258,6 +264,9 @@ public class RuntimeWeaverParameters {
 			} else if (arg.startsWith("keepk=")) {
 				String param = arg.substring("keepk=".length());
 				keepK = Boolean.parseBoolean(param);
+			} else if (arg.startsWith("abortonzerok=")) {
+				String param = arg.substring("abortonzerok=".length());
+				abortOnZeroK = Boolean.parseBoolean(param);
 			}
 		}
 	}
@@ -373,6 +382,10 @@ public class RuntimeWeaverParameters {
 
 	public boolean getKeepK() {
 		return keepK;
+	}
+
+	public boolean getAbortOnZeroK() {
+		return abortOnZeroK;
 	}
 
 	/**

@@ -79,7 +79,9 @@ public abstract class AbstractEventLogger implements IDataInfoListener {
 	 * @param trace specifies a file 
 	 */
 	protected void saveJson(PrintWriter w) {
-		w.write("{ \"format\":\"" + formatName + "\", \"events\": [\n");
+		w.write("{ \"format\":\"" + formatName + "\"");
+		writeTopLevelFields(w);
+		w.write(", \"events\": [\n");
 		
 		boolean isFirst = true;
 		for (int i=0; i<dataids.size(); i++) {
@@ -116,7 +118,18 @@ public abstract class AbstractEventLogger implements IDataInfoListener {
 	}
 	
 	/**
-	 * This method is to enable subclasses to access a list of dataIDs 
+	 * A subclass overrides this method to add its own top-level fields to the JSON output.
+	 * It is called right after the "format" field, so an implementation must write
+	 * a leading comma for each field it emits (e.g. {@code w.write(", \"key\":true")}).
+	 * The default implementation writes nothing, so the output of a subclass that does
+	 * not override it is unchanged.
+	 * @param w is the writer of the JSON file
+	 */
+	protected void writeTopLevelFields(PrintWriter w) {
+	}
+
+	/**
+	 * This method is to enable subclasses to access a list of dataIDs
 	 * @return a list of DataIDs
 	 */
 	protected ArrayList<DataInfo> getDataIDs() {

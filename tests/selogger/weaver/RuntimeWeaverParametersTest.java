@@ -100,4 +100,40 @@ public class RuntimeWeaverParametersTest {
 		assertTrue(params.getKeepK());
 	}
 
+	@Test
+	public void testAbortOnZeroKParameter() {
+		// 未指定なら既定の false。
+		RuntimeWeaverParameters params = new RuntimeWeaverParameters("format=promet,size=1000");
+		assertFalse(params.getAbortOnZeroK());
+
+		params = new RuntimeWeaverParameters("format=promet,abortonzerok=true");
+		assertTrue(params.getAbortOnZeroK());
+
+		params = new RuntimeWeaverParameters("format=promet,abortonzerok=false");
+		assertFalse(params.getAbortOnZeroK());
+
+		params = new RuntimeWeaverParameters("abortonzerok=TRUE");
+		assertTrue(params.getAbortOnZeroK());
+
+		// 不正値は既定の false に倒す。
+		params = new RuntimeWeaverParameters("abortonzerok=yes");
+		assertFalse(params.getAbortOnZeroK());
+
+		params = new RuntimeWeaverParameters("abortonzerok=");
+		assertFalse(params.getAbortOnZeroK());
+
+		// keepk と独立に指定できる。
+		params = new RuntimeWeaverParameters("format=promet,size=500,keepk=true,abortonzerok=true");
+		assertTrue(params.getKeepK());
+		assertTrue(params.getAbortOnZeroK());
+
+		params = new RuntimeWeaverParameters("format=promet,size=500,keepk=false,abortonzerok=true");
+		assertFalse(params.getKeepK());
+		assertTrue(params.getAbortOnZeroK());
+
+		params = new RuntimeWeaverParameters("format=promet,size=500,keepk=true,abortonzerok=false");
+		assertTrue(params.getKeepK());
+		assertFalse(params.getAbortOnZeroK());
+	}
+
 }
