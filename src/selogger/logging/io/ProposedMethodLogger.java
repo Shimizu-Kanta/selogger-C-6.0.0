@@ -81,6 +81,23 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	}
 
 	/**
+	 * trim 計画の並び順。originalSize 昇順、同値なら dataId 昇順。
+	 *
+	 * この順序は 2 つの用途で共有される。
+	 * 1. 累積和を作るための昇順ソート（cap の二分探索を O(1) 評価にするため）
+	 * 2. 余り枠を「保存数が少ない buffer から」+1 ずつ配る順序
+	 * 同じ順序なのでソートは trim 1 回につき 1 度で済む。
+	 */
+	private static final Comparator<TrimPlan> TRIM_PLAN_ORDER = new Comparator<TrimPlan>() {
+		@Override
+		public int compare(TrimPlan a, TrimPlan b) {
+			int bySize = Integer.compare(a.originalSize, b.originalSize);
+			if (bySize != 0) return bySize;
+			return Integer.compare(a.dataId, b.dataId);
+		}
+	};
+
+	/**
 	 * ロガーのインスタンスを作成します。
 	 */
 	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString,
@@ -153,50 +170,29 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	}
 
 	/**
-	 * 実際の buffer サイズから全体保持件数を再計算する。
+	 * 昇順ソート済みの保持件数と、その累積和から、
+	 * sum(min(size_i, cap)) &lt;= targetTotal を満たす最大の cap を二分探索で求める。
+	 *
+	 * <p>二分探索の各ステップは、buffer 全体を走査せずに
+	 * {@link #cappedTotal(int[], long[], int)} で評価される。
+	 * 探索そのものの構造（条件を満たす最大値を求める
+	 * {@code while (low < high)} / {@code mid = (low + high + 1) / 2}）は
+	 * buffer 走査版と完全に同一なので、返す cap も常に一致する。</p>
+	 *
+	 * @param sortedSizes 各 buffer の保持件数を昇順に並べたもの
+	 * @param prefixSums  sortedSizes の累積和。prefixSums[j] は先頭 j 件の合計。長さは n+1
+	 * @param targetTotal trim 後に全体で残すイベント数
+	 * @return 条件を満たす最大の cap
 	 */
-	private int recomputeTotalRecords() {
-		long total = 0;
-		for (ProposedMethodBuffer b: buffers) {
-			if (b != null) {
-				total += b.size();
-				if (total > Integer.MAX_VALUE) {
-					return Integer.MAX_VALUE;
-				}
-			}
-		}
-		return (int)total;
-	}
-
-	/**
-	 * cap を各 buffer の保持上限とした場合の全体保持件数を計算する。
-	 */
-	private long calculateCappedTotal(int cap) {
-		long total = 0;
-		for (ProposedMethodBuffer b: buffers) {
-			if (b != null) {
-				total += Math.min(b.size(), cap);
-			}
-		}
-		return total;
-	}
-
-	/**
-	 * sum(min(buffer.size(), cap)) <= targetTotal を満たす最大の cap を二分探索で探す。
-	 */
-	private int findGlobalCap(int targetTotal) {
-		int maxSize = 0;
-		for (ProposedMethodBuffer b: buffers) {
-			if (b != null) {
-				maxSize = Math.max(maxSize, b.size());
-			}
-		}
+	static int findGlobalCap(int[] sortedSizes, long[] prefixSums, int targetTotal) {
+		int n = sortedSizes.length;
+		int maxSize = (n == 0) ? 0 : sortedSizes[n - 1];
 
 		int low = 0;
 		int high = maxSize;
 		while (low < high) {
 			int mid = (low + high + 1) / 2;
-			long cappedTotal = calculateCappedTotal(mid);
+			long cappedTotal = cappedTotal(sortedSizes, prefixSums, mid);
 
 			if (cappedTotal <= targetTotal) {
 				low = mid;
@@ -208,48 +204,91 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	}
 
 	/**
+	 * cap を各 buffer の保持上限とした場合の全体保持件数 sum(min(size_i, cap)) を求める。
+	 *
+	 * <p>sortedSizes は昇順なので、cap 以下の要素は必ず先頭側に固まっている。
+	 * その個数を j とすると、先頭 j 件はそのまま残り（累積和 prefixSums[j]）、
+	 * 残る n-j 件はすべて cap に切り詰められる。</p>
+	 */
+	private static long cappedTotal(int[] sortedSizes, long[] prefixSums, int cap) {
+		int j = upperBound(sortedSizes, cap);
+		return prefixSums[j] + (long)(sortedSizes.length - j) * cap;
+	}
+
+	/**
+	 * 昇順ソート済み配列で、value 以下の要素数を返す。
+	 */
+	private static int upperBound(int[] sortedSizes, int value) {
+		int low = 0;
+		int high = sortedSizes.length;
+		while (low < high) {
+			int mid = (low + high) >>> 1;
+			if (sortedSizes[mid] <= value) {
+				low = mid + 1;
+			} else {
+				high = mid;
+			}
+		}
+		return low;
+	}
+
+	/**
 	 * 全 buffer 合計が上限に達したときに実行する global trim。
 	 *
-	 * 1. trim 後に残す全体件数 targetTotal を計算する。
-	 * 2. 二分探索で、各 buffer の共通保持上限 cap を決める。
-	 * 3. 小さい buffer は残し、大きい buffer を cap 付近まで削る。
-	 * 4. 各 buffer 内では seqnum の古い順に削る。
+	 * 1. 非 null な buffer を1回走査して trim 計画と全体保持件数を作る。
+	 * 2. originalSize 昇順にソートし、累積和を作る。
+	 * 3. 二分探索で、各 buffer の共通保持上限 cap を決める（各ステップ O(1) 評価）。
+	 * 4. 小さい buffer は残し、大きい buffer を cap 付近まで削る。
+	 * 5. 余り枠を、保存数の少ない buffer から +1 ずつ配る。
+	 * 6. 各 buffer 内では seqnum の古い順に削る。
 	 */
 	private void trimAllBuffers() {
-		totalRecords = recomputeTotalRecords();
+		// 手順1: buffer の走査はここ1回だけ。
+		// 全体保持件数の再計算（旧 recomputeTotalRecords）も同じ走査に統合している。
+		ArrayList<TrimPlan> plans = new ArrayList<>();
+		long total = 0;
+		for (int i=0; i<buffers.size(); i++) {
+			ProposedMethodBuffer b = buffers.get(i);
+			if (b == null) continue;
+
+			int originalSize = b.size();
+			plans.add(new TrimPlan(i, b, originalSize, 0));
+			total += originalSize;
+		}
+		totalRecords = (total > Integer.MAX_VALUE) ? Integer.MAX_VALUE : (int)total;
 
 		int targetTotal = getTargetTotalRecords();
 		if (totalRecords <= targetTotal) {
 			return;
 		}
 
-		int cap = findGlobalCap(targetTotal);
-		ArrayList<TrimPlan> plans = new ArrayList<>();
-		int plannedTotal = 0;
+		// 手順2: originalSize 昇順（同値なら dataId 昇順）。
+		// このソート結果を cap の二分探索と余り枠の配分の両方で使い回す。
+		Collections.sort(plans, TRIM_PLAN_ORDER);
 
-		for (int i=0; i<buffers.size(); i++) {
-			ProposedMethodBuffer b = buffers.get(i);
-			if (b == null) continue;
-
-			int originalSize = b.size();
-			int keepSize = Math.min(originalSize, cap);
-			plans.add(new TrimPlan(i, b, originalSize, keepSize));
-			plannedTotal += keepSize;
+		// 手順3: 累積和 P[0..n]。
+		int n = plans.size();
+		int[] sizes = new int[n];
+		long[] prefixSums = new long[n + 1];
+		for (int i=0; i<n; i++) {
+			sizes[i] = plans.get(i).originalSize;
+			prefixSums[i + 1] = prefixSums[i] + sizes[i];
 		}
 
-		// cap だけだと targetTotal より少なくなる場合がある。
+		// 手順4: cap の二分探索。
+		int cap = findGlobalCap(sizes, prefixSums, targetTotal);
+
+		// 手順5: 各 buffer の保持件数。
+		long plannedTotal = 0;
+		for (TrimPlan p: plans) {
+			p.keepSize = Math.min(p.originalSize, cap);
+			plannedTotal += p.keepSize;
+		}
+
+		// 手順6: cap だけだと targetTotal より少なくなる場合がある。
 		// 余った枠は、保存数が少ない buffer を優先して配る。
 		// これにより「保存の少ないものは残す / 保存の多いところから削る」方針に寄せる。
-		int remainingBudget = targetTotal - plannedTotal;
-		Collections.sort(plans, new Comparator<TrimPlan>() {
-			@Override
-			public int compare(TrimPlan a, TrimPlan b) {
-				int bySize = Integer.compare(a.originalSize, b.originalSize);
-				if (bySize != 0) return bySize;
-				return Integer.compare(a.dataId, b.dataId);
-			}
-		});
-
+		long remainingBudget = targetTotal - plannedTotal;
 		for (TrimPlan p: plans) {
 			if (remainingBudget <= 0) break;
 
@@ -259,6 +298,7 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 			}
 		}
 
+		// 手順7
 		int newTotal = 0;
 		for (TrimPlan p: plans) {
 			p.buffer.trimToSize(p.keepSize);
