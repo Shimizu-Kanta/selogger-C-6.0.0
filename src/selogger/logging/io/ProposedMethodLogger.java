@@ -89,7 +89,23 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	/** 出力先トレースファイル */
 	private File traceFile;
 
-	/** 文字列の全内容を記録するかどうかのフラグ */
+	/**
+	 * 文字列の全内容を記録するかどうかのフラグ。現状どこからも読まれていない。
+	 *
+	 * <p>注意点が 2 つある。</p>
+	 * <ol>
+	 * <li>RuntimeWeaver がこの引数に渡しているのは string= ではなく showbuffersize= の値
+	 *     （{@code params.getShowBufferSize()}）で、引数名と実際に渡る値がずれている。
+	 *     string= の値（{@code params.isRecordingString()}）を使っているのは
+	 *     BinaryStreamLogger / TextStreamLogger だけである。</li>
+	 * <li>値を読む箇所がないので、promet では string= も showbuffersize= も出力に効かない。
+	 *     ProposedMethodBuffer.writeJson は常に文字列本体（str フィールド）を書き出す。</li>
+	 * </ol>
+	 *
+	 * <p>意図的に未使用なのか、showbuffersize= を別の用途に使うつもりだったのかは不明。
+	 * 引数の渡し方を直すと既存の起動オプションの意味が変わるため、
+	 * ここでは状況を記録するにとどめている。</p>
+	 */
 	@SuppressWarnings("unused")
 	private boolean recordString;
 
@@ -267,6 +283,12 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		int target = (int)(((long)bufferSize * (long)leaveRate) / 100L);
 
 		// 追加前 trim のため、target が bufferSize と同じだと空きが作れない。
+		//
+		// leaveRate はコンストラクタで 1..99 に丸められるので、この 2 つの補正は
+		// 現状どちらも到達しない（target = bufferSize * r / 100 は r <= 99 なら
+		// 必ず bufferSize 未満、r >= 1 かつ bufferSize >= 1 なら必ず 0 以上）。
+		// leaveRate の丸めが将来変わったときに totalRecords > bufferSize の状態を
+		// 作らないための防御として残している。
 		if (target >= bufferSize) {
 			target = bufferSize - 1;
 		}
