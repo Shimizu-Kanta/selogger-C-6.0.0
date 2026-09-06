@@ -3,6 +3,7 @@ package selogger.logging.io;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicLong;
 
 import selogger.logging.io.ProposedMethodLogger.PrometObjectRecordingStrategy;
 import selogger.logging.util.JsonBuffer;
@@ -17,6 +18,36 @@ import selogger.logging.util.ObjectId;
 public class ProposedMethodBuffer {
 
 	private static final int DEFAULT_CAPACITY = 32;
+
+	// --- 計測用の統計 ---
+	// 既定では無効で、tests/ 配下の計測ハーネス（PrometMeasurementHarness）から
+	// 明示的に有効にしたときだけ数える。有効判定は trim / 配列拡張 / buffer 生成という
+	// 元から O(n) の処理の中でしか行わないので、記録経路には影響しない。
+
+	private static boolean statsEnabled = false;
+	private static final AtomicLong copiedRecords = new AtomicLong();
+	private static final AtomicLong allocatedArrays = new AtomicLong();
+
+	/** 計測を有効にし、カウンタを 0 に戻す。単一スレッドでの計測を想定している。 */
+	public static void enableStats() {
+		statsEnabled = true;
+		copiedRecords.set(0);
+		allocatedArrays.set(0);
+	}
+
+	public static void disableStats() {
+		statsEnabled = false;
+	}
+
+	/** @return trim / 詰め直しでコピーされたレコード数の累計（値・seqnum・thread をまとめて 1 件と数える） */
+	public static long getCopiedRecords() {
+		return copiedRecords.get();
+	}
+
+	/** @return 確保された配列の本数の累計（buffer 生成・配列拡張・trim をすべて含む） */
+	public static long getAllocatedArrays() {
+		return allocatedArrays.get();
+	}
 
 	/**
 	 * この buffer が論理的に保持し得る最大数、かつリングの法（modulus）。
@@ -65,6 +96,7 @@ public class ProposedMethodBuffer {
 		this.seqnums = new long[capacity];
 		this.threads = new int[capacity];
 		this.keepObject = keepObject;
+		if (statsEnabled) allocatedArrays.addAndGet(3);
 	}
 
 	/**
@@ -106,6 +138,7 @@ public class ProposedMethodBuffer {
 			this.seqnums = Arrays.copyOf(this.seqnums, capacity);
 			this.threads = Arrays.copyOf(this.threads, capacity);
 			expandValueArray(capacity);
+			if (statsEnabled) allocatedArrays.addAndGet(3);
 		}
 
 		int next = nextPos;
@@ -261,6 +294,11 @@ public class ProposedMethodBuffer {
 		storedSize = keepNewest;
 		nextPos = keepNewest;
 
+		if (statsEnabled) {
+			allocatedArrays.addAndGet(3);
+			copiedRecords.addAndGet(keepNewest);
+		}
+
 		// count は累積発生回数なので変更しない
 	}
 
@@ -336,6 +374,7 @@ public class ProposedMethodBuffer {
 		array = newValueArray(array.getClass().getComponentType(), 1);
 		seqnums = new long[1];
 		threads = new int[1];
+		if (statsEnabled) allocatedArrays.addAndGet(3);
 	}
 
 	/**
