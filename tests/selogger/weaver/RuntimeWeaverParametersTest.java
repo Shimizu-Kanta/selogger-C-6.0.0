@@ -63,4 +63,41 @@ public class RuntimeWeaverParametersTest {
 		assertEquals(80, params.getLeaveRate());
 	}
 
+	@Test
+	public void testKeepKParameter() {
+		// 未指定なら既定の false。
+		RuntimeWeaverParameters params = new RuntimeWeaverParameters("format=promet,size=1000");
+		assertFalse(params.getKeepK());
+
+		params = new RuntimeWeaverParameters("format=promet,keepk=true");
+		assertTrue(params.getKeepK());
+
+		params = new RuntimeWeaverParameters("format=promet,keepk=false");
+		assertFalse(params.getKeepK());
+
+		// Boolean.parseBoolean と同じく大文字小文字は区別しない。
+		params = new RuntimeWeaverParameters("keepk=TRUE");
+		assertTrue(params.getKeepK());
+
+		params = new RuntimeWeaverParameters("keepk=True");
+		assertTrue(params.getKeepK());
+
+		// 不正値は既定の false に倒す（showbuffersize= と同じ扱い）。
+		params = new RuntimeWeaverParameters("keepk=yes");
+		assertFalse(params.getKeepK());
+
+		params = new RuntimeWeaverParameters("keepk=1");
+		assertFalse(params.getKeepK());
+
+		params = new RuntimeWeaverParameters("keepk=");
+		assertFalse(params.getKeepK());
+
+		// 他のパラメータと併用できる。
+		params = new RuntimeWeaverParameters("format=promet,size=1000,leaverate=90,keepk=true,output=out");
+		assertEquals(Mode.Proposed, params.getMode());
+		assertEquals(1000, params.getBufferSize());
+		assertEquals(90, params.getLeaveRate());
+		assertTrue(params.getKeepK());
+	}
+
 }

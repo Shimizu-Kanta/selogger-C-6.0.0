@@ -118,6 +118,12 @@ public class RuntimeWeaverParameters {
 	 */
 	private int leave_rate = 80;
 
+	/**
+	 * 提案手法で、全体削除時に決まった共通上限 k を削除後も各 buffer の保持上限として
+	 * 効かせ続けるかどうか。挙動が変わるため既定は false。
+	 */
+	private boolean keepK = false;
+
 	public RuntimeWeaverParameters(String args) {
 		if (args == null)
 			args = "";
@@ -249,6 +255,9 @@ public class RuntimeWeaverParameters {
 				} catch (NumberFormatException e) {
 					leave_rate = 80;
 				}
+			} else if (arg.startsWith("keepk=")) {
+				String param = arg.substring("keepk=".length());
+				keepK = Boolean.parseBoolean(param);
 			}
 		}
 	}
@@ -360,6 +369,10 @@ public class RuntimeWeaverParameters {
 
 	public int getLeaveRate() {
 		return leave_rate;
+	}
+
+	public boolean getKeepK() {
+		return keepK;
 	}
 
 	/**

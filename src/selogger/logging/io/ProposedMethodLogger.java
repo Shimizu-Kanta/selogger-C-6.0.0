@@ -45,6 +45,28 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	/** 全 buffer 合計で現在保持しているイベント数 */
 	private int totalRecords;
 
+	/**
+	 * global trim で決まった共通上限 k を、trim 後も各 buffer の保持上限として
+	 * 効かせ続けるかどうか（promet の keepk オプション）。
+	 *
+	 * <p>論文 3.1 節の「既に fi が k に到達しているイベントに対しては、新たなイベントの
+	 * 発生ごとに最も古いイベントのデータが上書きされるので、イベントの合計数が増加しない。
+	 * これにより、アルゴリズムの頻繁な実行が起こらないようにしている」に対応する。</p>
+	 *
+	 * <p>有効にすると global trim の実行回数が大きく減る一方、k が再上昇しないため
+	 * 保存率がわずかに下がる。挙動が変わるので既定は false。</p>
+	 */
+	private final boolean keepK;
+
+	/**
+	 * 直近の global trim で決まった共通上限 k。keepK が真のときだけ意味を持つ。
+	 * trim 前の初期値は全体容量そのもの（実質的に上限なし）。
+	 */
+	private int currentCap;
+
+	/** global trim を実際に実行した回数。効果測定とテスト用。 */
+	private int trimCount;
+
 	/** 出力先トレースファイル */
 	private File traceFile;
 
@@ -98,10 +120,21 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	};
 
 	/**
-	 * ロガーのインスタンスを作成します。
+	 * ロガーのインスタンスを作成します。keepK は無効（既定）。
 	 */
 	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString,
 			PrometObjectRecordingStrategy keepObject, boolean outputJson, IErrorLogger errorLogger) {
+		this(traceFile, bufferSize, leaveRate, recordString, keepObject, outputJson, false, errorLogger);
+	}
+
+	/**
+	 * ロガーのインスタンスを作成します。
+	 *
+	 * @param keepK true なら、global trim で決まった共通上限 k を trim 後も
+	 *              各 buffer の保持上限として効かせ続ける（promet の keepk オプション）
+	 */
+	public ProposedMethodLogger(File traceFile, int bufferSize, int leaveRate, boolean recordString,
+			PrometObjectRecordingStrategy keepObject, boolean outputJson, boolean keepK, IErrorLogger errorLogger) {
 		super("promet");
 		this.traceFile = traceFile;
 		this.bufferSize = Math.max(1, bufferSize);
@@ -111,6 +144,8 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		this.totalRecords = 0;
 		this.keepObject = keepObject;
 		this.outputJson = outputJson;
+		this.keepK = keepK;
+		this.currentCap = this.bufferSize;
 		this.logger = errorLogger;
 
 		if (this.keepObject == PrometObjectRecordingStrategy.Id) {
@@ -128,9 +163,12 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		}
 		ProposedMethodBuffer buf = buffers.get(dataId);
 		if (buf == null) {
-			// bufferSize は全体容量だが、単一 buffer が理論上保持し得る最大値も全体容量なので、
-			// ProposedMethodBuffer の物理上限として同じ値を渡す。
-			buf = new ProposedMethodBuffer(type, bufferSize, keepObject);
+			// keepK が偽なら、bufferSize は全体容量だが単一 buffer が理論上保持し得る
+			// 最大値も全体容量なので、保持上限として同じ値を渡す。
+			//
+			// keepK が真なら、trim 後に初めて現れた dataId も共通の k で制限する。
+			// 「すべてのイベントの件数が高々 k 件」という論文の意味論に合わせるため。
+			buf = new ProposedMethodBuffer(type, keepK ? currentCap : bufferSize, keepObject);
 			buffers.set(dataId, buf);
 		}
 		return buf;
@@ -148,9 +186,22 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 
 	/**
 	 * イベントを1件追加した後に全体保持件数を更新する。
+	 *
+	 * <p>追加によって buffer の保持件数が実際に何件増えたかを見る。
+	 * keepK が真で、その buffer が既に保持上限 k に達している場合は、追加しても
+	 * 最古のイベントが上書きされるだけで保持件数は増えない。この「合計数が増加しない」
+	 * 状態こそが global trim の実行頻度を下げる仕組みなので、無条件に +1 してはならない。</p>
+	 *
+	 * <p>keepK が偽のとき、各 buffer の保持上限は全体容量 bufferSize と等しく、
+	 * 追加直前には ensureGlobalCapacityBeforeRecord によって
+	 * storedSize &lt;= totalRecords &lt; bufferSize が保証されている。
+	 * したがって delta は常に 1 であり、従来の無条件 +1 と完全に一致する。</p>
+	 *
+	 * @param sizeBefore 追加前の buffer の保持件数
+	 * @param buffer     追加先の buffer
 	 */
-	private void onRecordAdded() {
-		totalRecords++;
+	private void onRecordAdded(ProposedMethodBuffer buffer, int sizeBefore) {
+		totalRecords += buffer.size() - sizeBefore;
 	}
 
 	/**
@@ -306,6 +357,17 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		}
 
 		totalRecords = newTotal;
+		trimCount++;
+
+		// 手順8: keepK が真なら、共通上限 k を trim 後も各 buffer に効かせ続ける。
+		if (keepK) {
+			currentCap = cap;
+			for (TrimPlan p: plans) {
+				// keepSize は余り枠の再配分で cap + 1 になり得る。max を取らないと
+				// storedSize > retentionLimit の不整合になるため、ここは必ず max。
+				p.buffer.setRetentionLimit(Math.max(cap, p.keepSize));
+			}
+		}
 	}
 
 	// --- IEventLogger の記録メソッド群 ---
@@ -314,68 +376,89 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	@Override
 	public synchronized void recordEvent(int dataId, boolean value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, boolean.class).addBoolean(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, boolean.class);
+		int sizeBefore = buf.size();
+		buf.addBoolean(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, byte value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, byte.class).addByte(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, byte.class);
+		int sizeBefore = buf.size();
+		buf.addByte(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, char value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, char.class).addChar(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, char.class);
+		int sizeBefore = buf.size();
+		buf.addChar(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, double value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, double.class).addDouble(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, double.class);
+		int sizeBefore = buf.size();
+		buf.addDouble(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, float value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, float.class).addFloat(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, float.class);
+		int sizeBefore = buf.size();
+		buf.addFloat(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, int value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, int.class).addInt(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, int.class);
+		int sizeBefore = buf.size();
+		buf.addInt(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, long value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, long.class).addLong(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, long.class);
+		int sizeBefore = buf.size();
+		buf.addLong(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, short value) {
 		ensureGlobalCapacityBeforeRecord();
-		getBuffer(dataId, short.class).addShort(value, seqnum.getAndIncrement(), ThreadId.get());
-		onRecordAdded();
+		ProposedMethodBuffer buf = getBuffer(dataId, short.class);
+		int sizeBefore = buf.size();
+		buf.addShort(value, seqnum.getAndIncrement(), ThreadId.get());
+		onRecordAdded(buf, sizeBefore);
 	}
 
 	@Override
 	public synchronized void recordEvent(int dataId, Object value) {
 		ensureGlobalCapacityBeforeRecord();
 		if (keepObject == PrometObjectRecordingStrategy.Id) {
-			getBuffer(dataId, ObjectId.class).addObjectId(objectIDs.getObjectId(value), seqnum.getAndIncrement(), ThreadId.get());
+			ProposedMethodBuffer buf = getBuffer(dataId, ObjectId.class);
+			int sizeBefore = buf.size();
+			buf.addObjectId(objectIDs.getObjectId(value), seqnum.getAndIncrement(), ThreadId.get());
+			onRecordAdded(buf, sizeBefore);
 		} else {
-			getBuffer(dataId, Object.class).addObject(value, seqnum.getAndIncrement(), ThreadId.get());
+			ProposedMethodBuffer buf = getBuffer(dataId, Object.class);
+			int sizeBefore = buf.size();
+			buf.addObject(value, seqnum.getAndIncrement(), ThreadId.get());
+			onRecordAdded(buf, sizeBefore);
 		}
-		onRecordAdded();
 	}
 
 	// --- AbstractEventLogger のオーバーライド ---
@@ -398,7 +481,23 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 	@Override
 	protected void writeAttributes(StringBuilder builder, DataInfo d) {
 		ProposedMethodBuffer buf = buffers.get(d.getDataId());
-		if (buf != null) builder.append(buf.toString());
+		// カラム数は getColumnNames のヘッダと揃える必要がある。keepK 有効時は
+		// buffer ごとに保持上限が異なるので、全体容量 bufferSize を明示的に渡す。
+		if (buf != null) builder.append(buf.toCsvString(bufferSize));
+	}
+
+	/**
+	 * @return global trim を実際に実行した回数。効果測定とテスト用
+	 */
+	public synchronized int getTrimCount() {
+		return trimCount;
+	}
+
+	/**
+	 * @return 直近の global trim で決まった共通上限 k。keepK が偽なら常に全体容量
+	 */
+	public synchronized int getCurrentCap() {
+		return currentCap;
 	}
 
 	@Override
@@ -420,6 +519,10 @@ public class ProposedMethodLogger extends AbstractEventLogger implements IEventL
 		if (resetTrace) {
 			buffers = new ArrayList<>();
 			totalRecords = 0;
+			// 共通上限 k もトレースの状態なので、区間をリセットしたら上限なしに戻す。
+			// そうしないと、空になった直後の区間まで前の区間の k で制限され続ける。
+			// trimCount は測定用の累積カウンタなのでリセットしない。
+			currentCap = bufferSize;
 		}
 	}
 

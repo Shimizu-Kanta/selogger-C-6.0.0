@@ -18,10 +18,20 @@ public class ProposedMethodBuffer {
 
 	private static final int DEFAULT_CAPACITY = 32;
 
-	/** この buffer が物理的に保持し得る最大数。通常は全体容量と同じ値が渡される。 */
-	private int bufferSize;
+	/**
+	 * この buffer が論理的に保持し得る最大数、かつリングの法（modulus）。
+	 *
+	 * <p>物理配列サイズ {@link #capacity} とは別物であることに注意。
+	 * capacity は必要に応じて retentionLimit まで倍々に伸びる作業用の配列長で、
+	 * retentionLimit は「何件まで残すか」という論理的な上限である。</p>
+	 *
+	 * <p>{@link #setRetentionLimit(int)} で後から下げられる（promet の keepk 有効時に、
+	 * global trim で決まった共通上限 k を各 buffer に効かせるために使う）。
+	 * 下げても capacity は縮めない。</p>
+	 */
+	private int retentionLimit;
 
-	/** 現在の配列の物理サイズ */
+	/** 現在の配列の物理サイズ。retentionLimit を下げても縮めない。 */
 	private int capacity;
 
 	/** 次に書き込む物理インデックス */
@@ -48,9 +58,9 @@ public class ProposedMethodBuffer {
 	/**
 	 * バッファを作成します。
 	 */
-	public ProposedMethodBuffer(Class<?> type, int bufferSize, PrometObjectRecordingStrategy keepObject) {
-		this.bufferSize = Math.max(1, bufferSize);
-		this.capacity = Math.min(DEFAULT_CAPACITY, this.bufferSize);
+	public ProposedMethodBuffer(Class<?> type, int retentionLimit, PrometObjectRecordingStrategy keepObject) {
+		this.retentionLimit = Math.max(1, retentionLimit);
+		this.capacity = Math.min(DEFAULT_CAPACITY, this.retentionLimit);
 		this.array = newValueArray(type, capacity);
 		this.seqnums = new long[capacity];
 		this.threads = new int[capacity];
@@ -90,9 +100,9 @@ public class ProposedMethodBuffer {
 	private int getNextIndex() {
 		count++;
 
-		// bufferSize に達するまでは必要に応じて物理配列を拡張
-		if (storedSize >= capacity && capacity < bufferSize) {
-			capacity = Math.min(capacity * 2, bufferSize);
+		// retentionLimit に達するまでは必要に応じて物理配列を拡張
+		if (storedSize >= capacity && capacity < retentionLimit) {
+			capacity = Math.min(capacity * 2, retentionLimit);
 			this.seqnums = Arrays.copyOf(this.seqnums, capacity);
 			this.threads = Arrays.copyOf(this.threads, capacity);
 			expandValueArray(capacity);
@@ -100,12 +110,12 @@ public class ProposedMethodBuffer {
 
 		int next = nextPos;
 
-		if (storedSize < bufferSize) {
+		if (storedSize < retentionLimit) {
 			storedSize++;
 		}
 
 		nextPos++;
-		if (nextPos >= bufferSize) {
+		if (nextPos >= retentionLimit) {
 			nextPos = 0;
 		}
 
@@ -214,38 +224,99 @@ public class ProposedMethodBuffer {
 
 		int currentSize = size();
 		int actualTrim = Math.min(trimCount, currentSize);
-		int newSize = currentSize - actualTrim;
+		rebuildLinear(currentSize - actualTrim);
+	}
 
-		// 確保サイズは capacity のまま維持する。newSize まで縮めると、その後の再成長で
+	/**
+	 * 新しい側 keepNewest 件だけを、物理インデックス 0..keepNewest-1 に論理順で並べ直す。
+	 *
+	 * <p>実行後は必ず非折り返し状態（nextPos == storedSize）になるので、
+	 * 以降 getPos は恒等写像として振る舞う。</p>
+	 *
+	 * <p>keepNewest == storedSize を渡すと、削除せずに並べ替えだけを行う。
+	 * {@link #setRetentionLimit(int)} がリングの法を変える前に使う。</p>
+	 *
+	 * @param keepNewest 残す件数（0 &lt;= keepNewest &lt;= storedSize）
+	 */
+	private void rebuildLinear(int keepNewest) {
+		// 削る件数。残すのは論理位置 dropped..storedSize-1。
+		int dropped = storedSize - keepNewest;
+
+		// 確保サイズは capacity のまま維持する。keepNewest まで縮めると、その後の再成長で
 		// expandValueArray が繰り返し走るため。
 		Object newArray = newValueArray(array.getClass().getComponentType(), capacity);
 		long[] newSeqnums = new long[capacity];
 		int[] newThreads = new int[capacity];
 
-		// 残す区間は論理位置 actualTrim..currentSize-1。リングが折り返している場合が
-		// あるので、copyRange が最大2区間に分けて System.arraycopy でコピーする。
-		copyRange(array, newArray, actualTrim, newSize);
-		copyRange(seqnums, newSeqnums, actualTrim, newSize);
-		copyRange(threads, newThreads, actualTrim, newSize);
+		// リングが折り返している場合があるので、copyRange が最大2区間に分けて
+		// System.arraycopy でコピーする。
+		copyRange(array, newArray, dropped, keepNewest);
+		copyRange(seqnums, newSeqnums, dropped, keepNewest);
+		copyRange(threads, newThreads, dropped, keepNewest);
 
 		array = newArray;
 		seqnums = newSeqnums;
 		threads = newThreads;
 
-		storedSize = newSize;
-		nextPos = newSize;
+		storedSize = keepNewest;
+		nextPos = keepNewest;
 
 		// count は累積発生回数なので変更しない
+	}
+
+	/**
+	 * この buffer の保持上限を newLimit に変更する。
+	 *
+	 * <p>promet の keepk 有効時に、global trim で決まった共通上限 k を
+	 * 各 buffer に効かせ続けるために使う。上限に達した buffer への追記は
+	 * 最古のイベントを上書きするだけになり、全体保持件数が増えなくなるので、
+	 * global trim の実行頻度が下がる。</p>
+	 *
+	 * <p>現在の storedSize より小さい値は受け付けない。呼び出し側が先に
+	 * {@link #trimToSize(int)} で件数を落としておくこと。storedSize を下回る値が
+	 * 渡された場合は storedSize まで引き上げて適用する
+	 * （storedSize &gt; retentionLimit という不整合を作らないため）。</p>
+	 *
+	 * <p>物理配列サイズ {@link #capacity} は縮めない。上限だけを下げる。</p>
+	 *
+	 * @param newLimit 新しい保持上限。1 未満は 1 に切り上げる
+	 */
+	public synchronized void setRetentionLimit(int newLimit) {
+		newLimit = Math.max(1, newLimit);
+		newLimit = Math.max(newLimit, storedSize);
+
+		if (newLimit == retentionLimit) return;
+
+		// getPos / copyRange はリングの法として retentionLimit を使うので、
+		// 法を変える前に非折り返し状態へ直しておく必要がある。
+		// 折り返しているのは storedSize == retentionLimit のときだけ。
+		if (storedSize == retentionLimit) {
+			rebuildLinear(storedSize);
+		}
+
+		retentionLimit = newLimit;
+
+		// 上限を下げた場合、nextPos が新上限以上になっていることがある。
+		if (nextPos >= retentionLimit) {
+			nextPos %= retentionLimit;
+		}
+	}
+
+	/**
+	 * @return 現在の保持上限
+	 */
+	public synchronized int getRetentionLimit() {
+		return retentionLimit;
 	}
 
 	/**
 	 * 論理位置 from から len 件を、src の該当区間から dst の先頭へコピーする。
 	 *
 	 * <p>src はリングとして折り返している可能性があるため、{@link #getPos(int)} の統一形
-	 * getPos(i) == (base + i) % bufferSize にもとづいて最大2区間に分割する。</p>
+	 * getPos(i) == (base + i) % retentionLimit にもとづいて最大2区間に分割する。</p>
 	 * <ul>
 	 * <li>折り返しなし → arraycopy 1回</li>
-	 * <li>折り返しあり → 末尾側（physStart..bufferSize-1）と先頭側（0..）で arraycopy 2回</li>
+	 * <li>折り返しあり → 末尾側（physStart..retentionLimit-1）と先頭側（0..）で arraycopy 2回</li>
 	 * </ul>
 	 *
 	 * <p>コピー先 dst は論理順（最古が先頭）に詰め直されるので、呼び出し側は
@@ -263,7 +334,7 @@ public class ProposedMethodBuffer {
 		if (len <= 0) return;
 
 		int physStart = getPos(from);
-		int firstLen = Math.min(len, bufferSize - physStart);
+		int firstLen = Math.min(len, retentionLimit - physStart);
 
 		typedArrayCopy(src, physStart, dst, 0, firstLen);
 		if (firstLen < len) {
@@ -330,40 +401,55 @@ public class ProposedMethodBuffer {
 	 *
 	 * <p>仕様:</p>
 	 * <ul>
-	 * <li>storedSize &lt; bufferSize のとき（リングがまだ一周していない）、イベントは物理
+	 * <li>storedSize &lt; retentionLimit のとき（リングがまだ一周していない）、イベントは物理
 	 *     インデックス 0..storedSize-1 に発生順で並び、nextPos == storedSize である。
 	 *     よって getPos(i) == i（恒等写像）。</li>
-	 * <li>storedSize == bufferSize のとき（リングが埋まっている）、nextPos は次の書き込み先
-	 *     であり同時に最古の要素を指す。よって getPos(i) == (nextPos + i) % bufferSize。</li>
+	 * <li>storedSize == retentionLimit のとき（リングが埋まっている）、nextPos は次の書き込み先
+	 *     であり同時に最古の要素を指す。よって getPos(i) == (nextPos + i) % retentionLimit。</li>
 	 * </ul>
 	 *
-	 * <p>base = (storedSize &lt; bufferSize) ? 0 : nextPos とおくと、両者は
-	 * getPos(i) == (base + i) % bufferSize と統一的に書ける。前者では
-	 * base + i == i &lt; storedSize &lt;= capacity &lt;= bufferSize なので剰余が恒等になるためである。
+	 * <p>base = (storedSize &lt; retentionLimit) ? 0 : nextPos とおくと、両者は
+	 * getPos(i) == (base + i) % retentionLimit と統一的に書ける。前者では
+	 * base + i == i &lt; storedSize &lt;= capacity なので剰余が恒等になるためである。
 	 * {@link #copyRange(Object, Object, int, int)} はこの統一形を前提に、
-	 * 法 bufferSize での折り返し位置を計算している。</p>
+	 * 法 retentionLimit での折り返し位置を計算している。</p>
 	 *
-	 * <p>不変条件: storedSize &lt;= capacity &lt;= bufferSize。
-	 * リングが埋まっている場合は capacity == bufferSize なので、剰余の法 bufferSize は
-	 * 物理配列長と一致する。したがって上式の結果は常に物理配列の範囲内に収まる。</p>
+	 * <p>不変条件: storedSize &lt;= capacity かつ storedSize &lt;= retentionLimit。
+	 * capacity と retentionLimit の大小関係は固定されていない
+	 * （{@link #setRetentionLimit(int)} は上限だけを下げ、配列は縮めないため
+	 * capacity &gt; retentionLimit になり得る）。</p>
+	 *
+	 * <p>返り値が物理配列の範囲内に収まる理由:</p>
+	 * <ul>
+	 * <li>非折り返し時は i &lt; storedSize &lt;= capacity。</li>
+	 * <li>折り返し時は storedSize == retentionLimit と storedSize &lt;= capacity から
+	 *     retentionLimit &lt;= capacity が従うので、法 retentionLimit の剰余は
+	 *     必ず capacity 未満になる。</li>
+	 * </ul>
 	 */
 	private int getPos(int i) {
-		if (storedSize < bufferSize) {
+		if (storedSize < retentionLimit) {
 			return i;
 		}
 
-		return (nextPos + i) % bufferSize;
+		return (nextPos + i) % retentionLimit;
 	}
 
 	/**
 	 * CSV形式での文字列表現を生成します。
+	 *
+	 * <p>カラム数はヘッダ（ProposedMethodLogger.getColumnNames）と揃える必要があるため、
+	 * この buffer 自身の retentionLimit ではなく、呼び出し側が指定した columns で埋める。
+	 * keepk 有効時は retentionLimit が buffer ごとに異なり得るため、ここを
+	 * retentionLimit にすると行ごとにカラム数がずれてしまう。</p>
+	 *
+	 * @param columns ヘッダの value/seqnum/thread 組の数（= 全体容量 size）
 	 */
-	@Override
-	public synchronized String toString() {
+	public synchronized String toCsvString(int columns) {
 		StringBuilder buf = new StringBuilder();
 		buf.append(count()).append(",").append(size());
 		int currentSize = size();
-		for (int i = 0; i < bufferSize; i++) {
+		for (int i = 0; i < columns; i++) {
 			buf.append(",");
 			if (i < currentSize) {
 				int idx = getPos(i);
@@ -376,6 +462,15 @@ public class ProposedMethodBuffer {
 			}
 		}
 		return buf.toString();
+	}
+
+	/**
+	 * CSV形式での文字列表現を生成します。デバッグ用。
+	 * トレース出力には、カラム数を明示できる {@link #toCsvString(int)} を使うこと。
+	 */
+	@Override
+	public synchronized String toString() {
+		return toCsvString(retentionLimit);
 	}
 
 	/**
