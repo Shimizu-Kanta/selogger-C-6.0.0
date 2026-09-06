@@ -51,10 +51,36 @@ public class ProposedMethodBuffer {
 	public ProposedMethodBuffer(Class<?> type, int bufferSize, PrometObjectRecordingStrategy keepObject) {
 		this.bufferSize = Math.max(1, bufferSize);
 		this.capacity = Math.min(DEFAULT_CAPACITY, this.bufferSize);
-		this.array = Array.newInstance(type, capacity);
+		this.array = newValueArray(type, capacity);
 		this.seqnums = new long[capacity];
 		this.threads = new int[capacity];
 		this.keepObject = keepObject;
+	}
+
+	/**
+	 * 要素型 type の配列を size 件ぶん確保する。
+	 *
+	 * expandValueArray と同じ型分岐スタイルで、promet が実際に使う型
+	 * （8種のプリミティブ / ObjectId / Object）をリフレクションなしで確保する。
+	 * trim のたびに呼ばれるため、ここでリフレクションを使わないことに意味がある。
+	 *
+	 * 最後の Array.newInstance だけは残している。コンストラクタが任意の Class&lt;?&gt; を
+	 * 受け取る API になっており、上記以外の要素型（テスト等で String.class を渡す場合など）
+	 * でも配列の実要素型を保つ必要があるため。ProposedMethodLogger から渡ってくるのは
+	 * 上記10種のみなので、この分岐は通常の記録経路では実行されない。
+	 */
+	private static Object newValueArray(Class<?> type, int size) {
+		if (type == int.class) return new int[size];
+		if (type == long.class) return new long[size];
+		if (type == float.class) return new float[size];
+		if (type == double.class) return new double[size];
+		if (type == char.class) return new char[size];
+		if (type == short.class) return new short[size];
+		if (type == byte.class) return new byte[size];
+		if (type == boolean.class) return new boolean[size];
+		if (type == ObjectId.class) return new ObjectId[size];
+		if (type == Object.class) return new Object[size];
+		return Array.newInstance(type, size);
 	}
 
 	/**
@@ -190,16 +216,17 @@ public class ProposedMethodBuffer {
 		int actualTrim = Math.min(trimCount, currentSize);
 		int newSize = currentSize - actualTrim;
 
-		Object newArray = Array.newInstance(array.getClass().getComponentType(), capacity);
+		// 確保サイズは capacity のまま維持する。newSize まで縮めると、その後の再成長で
+		// expandValueArray が繰り返し走るため。
+		Object newArray = newValueArray(array.getClass().getComponentType(), capacity);
 		long[] newSeqnums = new long[capacity];
 		int[] newThreads = new int[capacity];
 
-		for (int i = 0; i < newSize; i++) {
-			int oldIdx = getPos(actualTrim + i);
-			Array.set(newArray, i, Array.get(array, oldIdx));
-			newSeqnums[i] = seqnums[oldIdx];
-			newThreads[i] = threads[oldIdx];
-		}
+		// 残す区間は論理位置 actualTrim..currentSize-1。リングが折り返している場合が
+		// あるので、copyRange が最大2区間に分けて System.arraycopy でコピーする。
+		copyRange(array, newArray, actualTrim, newSize);
+		copyRange(seqnums, newSeqnums, actualTrim, newSize);
+		copyRange(threads, newThreads, actualTrim, newSize);
 
 		array = newArray;
 		seqnums = newSeqnums;
@@ -209,6 +236,59 @@ public class ProposedMethodBuffer {
 		nextPos = newSize;
 
 		// count は累積発生回数なので変更しない
+	}
+
+	/**
+	 * 論理位置 from から len 件を、src の該当区間から dst の先頭へコピーする。
+	 *
+	 * <p>src はリングとして折り返している可能性があるため、{@link #getPos(int)} の統一形
+	 * getPos(i) == (base + i) % bufferSize にもとづいて最大2区間に分割する。</p>
+	 * <ul>
+	 * <li>折り返しなし → arraycopy 1回</li>
+	 * <li>折り返しあり → 末尾側（physStart..bufferSize-1）と先頭側（0..）で arraycopy 2回</li>
+	 * </ul>
+	 *
+	 * <p>コピー先 dst は論理順（最古が先頭）に詰め直されるので、呼び出し側は
+	 * storedSize / nextPos を len に更新すること。</p>
+	 *
+	 * <p>src と dst は同じ要素型の配列であること。値配列・seqnums・threads で
+	 * 同じ区間計算を共有するために引数型を Object にしている。</p>
+	 *
+	 * @param src  コピー元のリング配列
+	 * @param dst  コピー先の配列（長さは len 以上）
+	 * @param from コピーを開始する論理位置（最古 = 0）
+	 * @param len  コピーする件数
+	 */
+	private void copyRange(Object src, Object dst, int from, int len) {
+		if (len <= 0) return;
+
+		int physStart = getPos(from);
+		int firstLen = Math.min(len, bufferSize - physStart);
+
+		typedArrayCopy(src, physStart, dst, 0, firstLen);
+		if (firstLen < len) {
+			// 折り返し分。リングの先頭から残りをコピーする。
+			typedArrayCopy(src, 0, dst, firstLen, len - firstLen);
+		}
+	}
+
+	/**
+	 * 要素型ごとに分岐して System.arraycopy を呼ぶ。
+	 *
+	 * expandValueArray と同じ instanceof による型分岐スタイル。
+	 * 静的な要素型が確定するのでボクシングが起こらず、C2 が型ごとの高速な
+	 * コピーへインライン展開できる。
+	 */
+	private static void typedArrayCopy(Object src, int srcPos, Object dst, int dstPos, int len) {
+		if (src instanceof int[]) System.arraycopy((int[])src, srcPos, (int[])dst, dstPos, len);
+		else if (src instanceof long[]) System.arraycopy((long[])src, srcPos, (long[])dst, dstPos, len);
+		else if (src instanceof float[]) System.arraycopy((float[])src, srcPos, (float[])dst, dstPos, len);
+		else if (src instanceof double[]) System.arraycopy((double[])src, srcPos, (double[])dst, dstPos, len);
+		else if (src instanceof char[]) System.arraycopy((char[])src, srcPos, (char[])dst, dstPos, len);
+		else if (src instanceof short[]) System.arraycopy((short[])src, srcPos, (short[])dst, dstPos, len);
+		else if (src instanceof byte[]) System.arraycopy((byte[])src, srcPos, (byte[])dst, dstPos, len);
+		else if (src instanceof boolean[]) System.arraycopy((boolean[])src, srcPos, (boolean[])dst, dstPos, len);
+		else System.arraycopy((Object[])src, srcPos, (Object[])dst, dstPos, len);
 	}
 
 	/**
@@ -246,7 +326,26 @@ public class ProposedMethodBuffer {
 	}
 
 	/**
-	 * 論理的な i 番目（最古=0）の物理インデックスを計算する。
+	 * 論理的な i 番目（最古 = 0、0 &lt;= i &lt; storedSize）に対応する物理インデックスを返す。
+	 *
+	 * <p>仕様:</p>
+	 * <ul>
+	 * <li>storedSize &lt; bufferSize のとき（リングがまだ一周していない）、イベントは物理
+	 *     インデックス 0..storedSize-1 に発生順で並び、nextPos == storedSize である。
+	 *     よって getPos(i) == i（恒等写像）。</li>
+	 * <li>storedSize == bufferSize のとき（リングが埋まっている）、nextPos は次の書き込み先
+	 *     であり同時に最古の要素を指す。よって getPos(i) == (nextPos + i) % bufferSize。</li>
+	 * </ul>
+	 *
+	 * <p>base = (storedSize &lt; bufferSize) ? 0 : nextPos とおくと、両者は
+	 * getPos(i) == (base + i) % bufferSize と統一的に書ける。前者では
+	 * base + i == i &lt; storedSize &lt;= capacity &lt;= bufferSize なので剰余が恒等になるためである。
+	 * {@link #copyRange(Object, Object, int, int)} はこの統一形を前提に、
+	 * 法 bufferSize での折り返し位置を計算している。</p>
+	 *
+	 * <p>不変条件: storedSize &lt;= capacity &lt;= bufferSize。
+	 * リングが埋まっている場合は capacity == bufferSize なので、剰余の法 bufferSize は
+	 * 物理配列長と一致する。したがって上式の結果は常に物理配列の範囲内に収まる。</p>
 	 */
 	private int getPos(int i) {
 		if (storedSize < bufferSize) {
